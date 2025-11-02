@@ -110,13 +110,11 @@ async def help_command(update, context):
         "/status - Check account and bot status\n"
         "/start - Start OBot (RUNNING)\n"
         "/stop - Stop OBot (STOPPED)\n"
+        "/fix - Download and reload system files\n"
         "/retrain - Retrain in background\n"
         "/update - Updating EA\n"
-        "/fix - Download and reload system files\n"
-        "/help - Show CCOBOT\n"
-        "------------------------------------\n"
-        "Danger! Use Only one time\n"
         "/reboot - Restarting System\n"
+        "/help - Show CCOBOT\n"
         "------------------------------------"
     )
     await update.message.reply_text(help_message, parse_mode='Markdown')
@@ -211,7 +209,7 @@ def main():
     application.add_handler(CommandHandler("status", status_command)) 
     application.add_handler(CommandHandler("retrain", retrain_command))  
     application.add_handler(CommandHandler("update", update_command))
-    application.add_handler(CommandHandler("restart_api", restart_api_command)) # <-- 🆕 เพิ่มบรรทัดนี้
+    application.add_handler(CommandHandler("reboot", restart_api_command)) # <-- 🆕 เพิ่มบรรทัดนี้
     application.add_handler(CommandHandler("fix", fix_command))
     application.add_handler(CommandHandler("help", help_command))
     # Start the Bot 

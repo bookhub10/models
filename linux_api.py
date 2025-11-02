@@ -97,7 +97,45 @@ def download_model_assets():
             print(f"❌ Failed to download {output_path}: {e}")
             raise
 
+# --- Download Python Files from GitHub ---
+def download_python_files():
+    """Download the main Python scripts from GitHub."""
+    GITHUB_PYTHON_FILES = {
+        'linux_api': {
+            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/linux_api.py',
+            'filename': 'linux_api.py'
+        },
+        'linux_telegram': {
+            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/linux_telegram.py',
+            'filename': 'linux_telegram.py'
+        },
+        # Assuming linux_model.py is in the root directory for simplicity.
+        # If it's in a different path, adjust filename here.
+        'linux_model': { 
+            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/linux_model.py',
+            'filename': 'linux_model.py'
+        }
+    }
 
+    success = True
+    for file_info in GITHUB_PYTHON_FILES.values():
+        url = file_info['url']
+        output_path = file_info['filename']
+
+        try:
+            print(f"⬇️ Downloading {output_path} from GitHub...")
+            response = requests.get(url)
+            response.raise_for_status()
+
+            with open(output_path, 'wb') as f:
+                f.write(response.content)
+
+            print(f"✅ Downloaded: {output_path}")
+        except Exception as e:
+            print(f"❌ Failed to download {output_path}: {e}")
+            success = False
+            # ไม่ throw error เพื่อให้ลองดาวน์โหลดไฟล์อื่นต่อ
+    return success
 
 # --- Asset Management ---
 
@@ -340,10 +378,10 @@ def update_expert_advisor():
     Downloads the latest .mq5 file from GitHub and recompiles it.
     """
     # 🛑 (ต้องแก้ไข) ใส่ URL ของไฟล์ .mq5 ของคุณใน GitHub
-    EA_URL = 'https://raw.githubusercontent.com/bookhub10/models/main/Obot.mq5' 
+    EA_URL = 'https://raw.githubusercontent.com/bookhub10/models/main/linux_OBot.mq5' 
     
     # 🛑 (ต้องแก้ไข) ใส่ Path ไปยังไฟล์ .mq5 ในเครื่อง Xubuntu
-    EA_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/Obot.mq5"
+    EA_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/OBotTrading.mq5"
     
     # 🛑 (ต้องแก้ไข) ใส่ Path ไปยัง metaeditor64.exe
     METAEDITOR_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/metaeditor64.exe"
@@ -371,7 +409,7 @@ def update_expert_advisor():
         # รันคำสั่งคอมไพล์ผ่าน Wine
         # เราใช้ /compile:"<path_in_wine>"
         # C:\Program Files\MetaTrader 5\MQL5\Experts\Obot.mq5
-        wine_ea_path = "C:\\Program Files\\MetaTrader 5\\MQL5\\Experts\\Obot.mq5"
+        wine_ea_path = "C:\\Program Files\\MetaTrader 5\\MQL5\\Experts\\OBotTrading.mq5"
         
         compile_command = [
             "wine", 
@@ -407,6 +445,35 @@ def restart_api_service():
     except Exception as e:
         print(f"❌ Error in /restart_api: {e}")
         return jsonify({'status': 'FAIL', 'message': str(e)}), 500
+
+# 🆕 เพิ่ม Endpoint /fix
+@app.route('/fix', methods=['POST'])
+def fix_system_files():
+    """Downloads updated Python scripts and reloads model assets."""
+    # 1. ดาวน์โหลดไฟล์ Python ใหม่
+    python_downloaded = download_python_files()
+
+    # 2. ดาวน์โหลดโมเดลและ scaler ใหม่ (เหมือนกับการ retrain)
+    try:
+        download_model_assets()
+    except Exception as e:
+        return jsonify({'status': 'FAIL', 'message': f'❌ Failed to download model assets: {str(e)}. Python files may be updated.'}), 500
+        
+    # 3. โหลดโมเดลและ Scaler เข้า memory
+    assets_loaded = load_assets()
+    
+    message = "✅ System files and assets updated successfully."
+    
+    if not python_downloaded:
+        message = "⚠️ Python files update failed for one or more files. Assets reloaded."
+
+    if not assets_loaded:
+        return jsonify({'status': 'FAIL', 'message': '⚠️ Assets downloaded but failed to load into memory. System files updated. **Please manually restart the server.**'}), 500
+
+    return jsonify({
+        'status': 'SUCCESS', 
+        'message': f'{message} **Requires Server Restart** for new Python files to take effect.'
+    }), 200
 
 # --- Server Run ---
 if __name__ == '__main__':
