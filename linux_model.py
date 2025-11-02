@@ -14,7 +14,37 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import tensorflow as tf
+#from github import Github
 import talib
+
+# ==========================
+# CONFIG สำหรับ GitHub
+# ==========================
+# GITHUB_TOKEN = "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"  # <- ใส่ Token ของคุณ
+# REPO_NAME = "bookhub10/models"                  # <- ใส่ชื่อ repo เช่น oakjkp/gru-bot-model
+# GITHUB_BRANCH = "main"                        # สาขา
+
+# ==========================
+# ฟังก์ชันช่วยอัปโหลด GitHub
+# ==========================
+# def upload_to_github(local_path, repo_path, message="Upload model to GitHub"):
+#     """Upload local file to GitHub repo"""
+#     g = Github(GITHUB_TOKEN)
+#     repo = g.get_repo(REPO_NAME)
+#     with open(local_path, "rb") as f:
+#         content = f.read()
+#     try:
+#         repo.create_file(repo_path, message, content, branch=GITHUB_BRANCH)
+#         print(f"Uploaded {local_path} to GitHub as {repo_path}")
+#     except Exception as e:
+#         # ถ้าไฟล์มีอยู่แล้วให้ update แทน
+#         try:
+#             file = repo.get_contents(repo_path, ref=GITHUB_BRANCH)
+#             repo.update_file(file.path, message, content, file.sha, branch=GITHUB_BRANCH)
+#             print(f"Updated {local_path} on GitHub as {repo_path}")
+#         except Exception as e2:
+#             print(f"Error uploading {local_path}: {e2}")
+
 # ==============================================================================
 # PART 1: DATA COLLECTION AND PREPROCESSING
 # ==============================================================================
@@ -35,72 +65,107 @@ import talib
 #     return True
 
 # def get_xauusd_data(days=180, timeframe=mt5.TIMEFRAME_M5):
-#     """Get XAUUSD data"""
+#     """Get XAUUSD data FOR M5 (Base)"""
+#     # (ฟังก์ชันนี้เหมือนเดิมทุกประการ)
 #     timezone = pytz.timezone("Etc/UTC")
 #     time_from = datetime.now(timezone) - timedelta(days=days)
-    
-#     # ดึงข้อมูลจาก MT5
 #     rates = mt5.copy_rates_from(
 #         "XAUUSD", 
 #         timeframe, 
 #         time_from, 
-#         30000 # ดึงข้อมูลสูงสุด 30000 แท่ง
+#         30000 
 #     )
-    
 #     if rates is None or len(rates) == 0:
 #         print("Failed to get XAUUSD data.")
 #         return pd.DataFrame()
-
 #     df = pd.DataFrame(rates)
 #     df['time'] = pd.to_datetime(df['time'], unit='s')
 #     df.set_index('time', inplace=True)
 #     df.drop(columns=['spread', 'real_volume'], inplace=True)
 #     return df
 
+# def get_other_timeframe_data(days, timeframe):
+#     """🆕 ฟังก์ชันใหม่สำหรับดึงข้อมูล TF อื่น"""
+#     timezone = pytz.timezone("Etc/UTC")
+#     time_from = datetime.now(timezone) - timedelta(days=days)
+#     rates = mt5.copy_rates_from("XAUUSD", timeframe, time_from, 30000)
+#     if rates is None or len(rates) == 0:
+#         return pd.DataFrame()
+#     df = pd.DataFrame(rates)
+#     df['time'] = pd.to_datetime(df['time'], unit='s')
+#     df.set_index('time', inplace=True)
+#     df = df[['close']] # เราต้องการแค่ราคาปิด
+#     return df
+
 # 🛑 A. ADD TECHNICAL INDICATORS (ตาม Obot_model) 🛑
-def add_technical_indicators(df):
+def add_technical_indicators(df_m5, df_m30, df_h1):
     """
-    Adds necessary technical indicators using TA-Lib (MUST match the final model: 9 features).
+    เวอร์ชันอัปเกรด: เพิ่มฟีเจอร์จาก M5, M30, และ H1 (using TA-Lib only)
     """
     
-    # ตรวจสอบว่า df ไม่ใช่ read-only (บางครั้ง Pandas copy มาแล้วเป็น)
-    df = df.copy()
-
-    # 1. เตรียมข้อมูลสำหรับ TA-Lib
-    # TA-Lib ต้องการ numpy array ชนิด float64
-    close_prices = df['close'].values.astype(np.float64)
-    high_prices = df['high'].values.astype(np.float64)
-    low_prices = df['low'].values.astype(np.float64)
-
-    # 2. Simple Moving Average (SMA 10 and 50)
-    df['SMA_10'] = talib.SMA(close_prices, timeperiod=10)
-    df['SMA_50'] = talib.SMA(close_prices, timeperiod=50)
-
-    # 3. Momentum (1-period)
-    # talib.MOM(timeperiod=1) จะเทียบ close[i] กับ close[i-1] ซึ่งเทียบเท่ากับ pandas.diff(1)
-    df['Momentum_1'] = talib.MOM(close_prices, timeperiod=1)
-
-    # 4. Price Range (High - Low)
-    # อันนี้ใช้ Pandas ธรรมดาได้เลย เพราะตรงไปตรงมา
-    df['High_Low'] = df['high'] - df['low']
+    # === ส่วนที่ 1: คำนวณฟีเจอร์ M5 (เหมือนเดิม) ===
+    df_m5 = df_m5.copy()
+    close_prices_m5 = df_m5['close'].values.astype(np.float64)
     
-    # 5. Remove rows with NaN 
-    # (TA-Lib จะสร้าง NaN ในช่วงแรก เช่น 50 แถวแรกของ SMA_50)
-    df.dropna(inplace=True)
-    df.reset_index(drop=True, inplace=True)
+    df_m5['SMA_10'] = talib.SMA(close_prices_m5, timeperiod=10)
+    df_m5['SMA_50'] = talib.SMA(close_prices_m5, timeperiod=50)
+    df_m5['Momentum_1'] = talib.MOM(close_prices_m5, timeperiod=1)
+    df_m5['High_Low'] = df_m5['high'] - df_m5['low']
 
-    # 6. 🛑 เลือกเฉพาะ 9 features ที่จะใช้จริง
-    feature_cols = ['open', 'high', 'low', 'close', 'tick_volume', 
-                    'SMA_10', 'SMA_50', 'Momentum_1', 'High_Low']
+    # === ส่วนที่ 2: คำนวณฟีเจอร์ Multi-Timeframe (using TA-Lib) ===
     
-    # ตรวจสอบเผื่อมีคอลัมน์หาย
-    final_cols = [col for col in feature_cols if col in df.columns]
+    # 2.1: M30 RSI (RSI 14 บน Timeframe M30)
+    # 🆕 แก้ไข: ใช้ talib.RSI แทน pandas_ta
+    close_prices_m30 = df_m30['close'].values.astype(np.float64)
+    df_m30['M30_RSI'] = talib.RSI(close_prices_m30, timeperiod=14)
+    
+    # 2.2: H1 MA Trend (MA 200 บน Timeframe H1)
+    # 🆕 แก้ไข: ใช้ talib.SMA แทน pandas_ta
+    close_prices_h1 = df_h1['close'].values.astype(np.float64)
+    df_h1['H1_MA_200'] = talib.SMA(close_prices_h1, timeperiod=200)
+    
+    # สร้างฟีเจอร์ Trend: 1 ถ้าอยู่เหนือเส้น, 0 ถ้าอยู่ใต้เส้น (เหมือนเดิม)
+    df_h1['H1_MA_Trend'] = np.where(df_h1['close'] > df_h1['H1_MA_200'], 1, 0)
+    
+    # === ส่วนที่ 3: "การจัดเรียง" (Alignment) ===
+    # (ส่วนนี้เหมือนเดิม 100% เพราะใช้ pandas ที่คุณมีอยู่แล้ว)
+    
+    print("Aligning M30 features to M5 timeline...")
+    df_combined = pd.merge_asof(
+        df_m5.sort_index(), 
+        df_m30[['M30_RSI']].sort_index(), 
+        left_index=True, 
+        right_index=True, 
+        direction='backward'
+    )
+    
+    print("Aligning H1 features to M5 timeline...")
+    df_final = pd.merge_asof(
+        df_combined.sort_index(),
+        df_h1[['H1_MA_Trend']].sort_index(),
+        left_index=True,
+        right_index=True,
+        direction='backward'
+    )
+    
+    # === ส่วนที่ 4: สรุปผล (เหมือนเดิม 100%) ===
+    df_final.dropna(inplace=True)
+    df_final.reset_index(drop=True, inplace=True)
+
+    feature_cols = [
+        'open', 'high', 'low', 'close', 'tick_volume', 
+        'SMA_10', 'SMA_50', 'Momentum_1', 'High_Low',
+        'M30_RSI', 'H1_MA_Trend'  # <-- ฟีเจอร์ใหม่ 2 ตัว
+    ]
+    
+    final_cols = [col for col in feature_cols if col in df_final.columns]
     if len(final_cols) != len(feature_cols):
-        print(f"Warning: Missing columns! Expected {feature_cols}, found {final_cols}")
+        print(f"Warning: Missing columns! Expected {len(feature_cols)}, found {len(final_cols)}")
         
-    df = df[final_cols].copy()
+    df_final = df_final[final_cols].copy()
     
-    return df
+    print(f"Total features created: {len(df_final.columns)}")
+    return df_final
 
 # 🛑 B. CREATE SEQUENCES AND LABELS (ปรับให้สอดคล้องกับการเทรด) 🛑
 def create_sequences_and_labels(df, sequence_length=100, lookahead_bars=1):
@@ -150,12 +215,27 @@ def scale_features(train_df, test_df=None, scaler=None):
         
     return scaler, train_scaled_df, None
 
-# def collect_and_scale_data(days=180, timeframe=mt5.TIMEFRAME_M5):
-#     """Collects data, adds indicators, and splits for training/testing."""
-#     df_raw = get_xauusd_data(days, timeframe)
-#     if df_raw.empty: return None, None, None, None, None
+# def collect_and_scale_data(days=180):
+#     """
+#     เวอร์ชันอัปเกรด: ดึงข้อมูล 3 Timeframes และรวมเข้าด้วยกัน
+#     """
+#     print("Fetching M5 data...")
+#     df_m5_raw = get_xauusd_data(days, mt5.TIMEFRAME_M5)
+#     print("Fetching M30 data...")
+#     df_m30_raw = get_other_timeframe_data(days, mt5.TIMEFRAME_M30)
+#     print("Fetching H1 data...")
+#     df_h1_raw = get_other_timeframe_data(days, mt5.TIMEFRAME_H1)
+    
+#     if df_m5_raw.empty or df_m30_raw.empty or df_h1_raw.empty:
+#         print("Data collection failed for one or more timeframes.")
+#         return None, None, None, None, None
 
-#     df_features = add_technical_indicators(df_raw.copy())
+#     # ส่ง DF ทั้ง 3 เข้าไปประมวลผล
+#     df_features = add_technical_indicators(df_m5_raw, df_m30_raw, df_h1_raw)
+
+#     if df_features.empty:
+#         print("Failed to create features or data was insufficient.")
+#         return None, None, None, None, None
 
 #     # Split: 80% train, 20% test
 #     train_size = int(len(df_features) * 0.8)
@@ -165,8 +245,7 @@ def scale_features(train_df, test_df=None, scaler=None):
 #     # Scale: Fit only on training data
 #     scaler, train_scaled_df, test_scaled_df = scale_features(train_df, test_df)
 
-#     # Check the number of features after scaling
-#     print(f"Total features used: {train_scaled_df.shape[1]}") 
+#     print(f"Total features scaled: {train_scaled_df.shape[1]}") 
     
 #     return scaler, train_scaled_df, test_scaled_df, train_df, test_df
 
@@ -175,25 +254,27 @@ def scale_features(train_df, test_df=None, scaler=None):
 # ==============================================================================
 
 # 🛑 D. BUILD GRU MODEL (โครงสร้างมาตรฐาน) 🛑
+# 🛑 D. BUILD GRU MODEL (โครงสร้างมาตรฐาน) 🛑
 def build_gru_model(input_shape):
-    """Defines the GRU-RNN model architecture."""
+    """
+    Defines the GRU-RNN model architecture.
+     input_shape จะเป็น (sequence_length, 11)
+    """
+    print(f"Building model with Input Shape: {input_shape}") # <-- เพิ่ม log
     
     model = Sequential([
-        Input(shape=input_shape),
+        Input(shape=input_shape), # <-- input_shape ใหม่
         # 1st GRU Layer
         GRU(units=128, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.001)),
         Dropout(0.3),
         # 2nd GRU Layer
         GRU(units=64, return_sequences=False, activation='tanh', kernel_regularizer=l2(0.001)),
         Dropout(0.3),
-        # Output Layer (Binary Classification: Buy=1, Sell/Hold=0)
+        # Output Layer
         Dense(units=1, activation='sigmoid')
     ])
     
-    # ใช้ Adam Optimizer
     optimizer = Adam(learning_rate=0.001)
-    
-    # Compile Model
     model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
     
     return model
@@ -208,21 +289,26 @@ def build_gru_model(input_shape):
 #     lookahead_bars=1,
 #     epochs=50, 
 #     batch_size=32, 
-#     days=180, 
-#     timeframe=mt5.TIMEFRAME_M5
+#     days=180
+#     # timeframe ถูกลบออก เพราะเราดึง 3 TFs
 # ):
 #     """
 #     Main function to run the full training process.
 #     """
-#     print(f"Starting model training for XAUUSD on M5...")
+#     print(f"Starting model training for XAUUSD (Multi-Timeframe)...")
 
 #     # 1. Connect and Collect Data
 #     if not initialize_mt5():
 #         print("Cannot connect to MT5.")
 #         return None
     
+#     # 🛑 แก้ไขการเรียก: ไม่ต้องส่ง timeframe
 #     scaler, train_scaled_df, test_scaled_df, train_df, test_df = \
-#         collect_and_scale_data(days=days, timeframe=timeframe)
+#         collect_and_scale_data(days=days)
+    
+#     # ... (ส่วนที่เหลือของฟังก์ชัน train_rnn_model_main เหมือนเดิมทั้งหมด) ...
+#     # (เช่น create_sequences_and_labels, Handle Class Imbalance,
+#     #  Build Model, Callbacks, Train Model, Save model/scaler, Upload)
     
 #     if train_scaled_df is None or test_scaled_df is None:
 #         print("Data collection failed or returned empty dataframes.")
@@ -231,7 +317,7 @@ def build_gru_model(input_shape):
     
 #     print(f"Train/Test split: {len(train_scaled_df)} / {len(test_scaled_df)} bars.")
 
-#     # 2. Create Sequences and Labels
+#     # 2. Create Sequences and Labels (ฟังก์ชันนี้ยังใช้ได้เหมือนเดิม)
 #     X_train, y_train = create_sequences_and_labels(
 #         train_scaled_df, 
 #         sequence_length=sequence_length,
@@ -242,17 +328,17 @@ def build_gru_model(input_shape):
 #         sequence_length=sequence_length,
 #         lookahead_bars=lookahead_bars
 #     )
+    
+#     if X_train.shape[0] == 0:
+#          print("Not enough data to create training sequences.")
+#          mt5.shutdown()
+#          return None
 
+#     # (ตรวจสอบว่า Input Shape ถูกต้อง)
 #     print(f"X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
 #     print(f"X_test shape: {X_test.shape}, y_test shape: {y_test.shape}")
     
-#     if X_train.shape[0] == 0:
-#         print("Not enough data to create training sequences.")
-#         mt5.shutdown()
-#         return None
-
-#     # 3. Handle Class Imbalance (if any)
-#     # y_train = y_train.flatten() # y_train should already be 1D
+#     # 3. Handle Class Imbalance (เหมือนเดิม)
 #     unique_classes, counts = np.unique(y_train, return_counts=True)
 #     if len(unique_classes) > 1:
 #         class_weights = class_weight.compute_class_weight(
@@ -263,18 +349,16 @@ def build_gru_model(input_shape):
 #         class_weight_dict = dict(zip(unique_classes, class_weights))
 #         print(f"Class Weights: {class_weight_dict}")
 #     else:
-#         # กรณีที่มีคลาสเดียว (ไม่น่าจะเกิดขึ้น)
 #         class_weight_dict = {unique_classes[0]: 1.0}
 
-
-#     # 4. Build Model
-#     input_shape = (sequence_length, X_train.shape[2])
+#     # 4. Build Model (โมเดลจะรับ input_shape ใหม่โดยอัตโนมัติ)
+#     input_shape = (sequence_length, X_train.shape[2]) # X_train.shape[2] ตอนนี้จะเป็น 11
 #     model = build_gru_model(input_shape)
 #     print("Model built and compiled.")
 
-#     # 5. Define Callbacks
+#     # 5. Define Callbacks (เหมือนเดิม)
 #     model_checkpoint_callback = ModelCheckpoint(
-#         filepath='models/gru_bot_best_M5.h5', # 🚨 Updated path for consistency
+#         filepath='models/gru_bot_best_M5.h5', 
 #         monitor='val_accuracy', 
 #         save_best_only=True, 
 #         mode='max', 
@@ -288,7 +372,7 @@ def build_gru_model(input_shape):
 #         verbose=1
 #     )
 
-#     # 6. Train Model
+#     # 6. Train Model (เหมือนเดิม)
 #     print("Starting training...")
 #     history = model.fit(
 #         X_train, y_train,
@@ -301,19 +385,19 @@ def build_gru_model(input_shape):
 #     )
 #     print("Training finished.")
 
-#     # Load best model
+#     # 7. Load best model (เหมือนเดิม)
 #     best_model = load_model('models/gru_bot_best_M5.h5')
     
-#     # 7. Evaluate and Backtest (Placeholder - Requires separate backtest logic)
-#     # ... (Evaluation and Backtest steps are omitted for brevity/focus on deployment) ...
-    
-#     # 8. Save final model and scaler
+#     # 8. Save final model and scaler (เหมือนเดิม)
 #     os.makedirs('models', exist_ok=True)
-
 #     with open('models/scaler.pkl', 'wb') as f:
 #         pickle.dump(scaler, f)
-        
-#     print("\nTraining completed. Model and Scaler saved.")  
+#     print("\nTraining completed. Model and Scaler saved locally.")  
+
+#     # 9. 🚀 อัปโหลดขึ้น GitHub (เหมือนเดิม)
+#     upload_to_github("models/gru_bot_best_M5.h5", "models/gru_bot_best_M5.h5")
+#     upload_to_github("models/scaler.pkl", "models/scaler.pkl")
+
 #     mt5.shutdown()
 #     return best_model
 
