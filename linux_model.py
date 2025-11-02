@@ -14,36 +14,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import tensorflow as tf
-#from github import Github
 import talib
-
-# ==========================
-# CONFIG สำหรับ GitHub
-# ==========================
-# GITHUB_TOKEN = "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"  # <- ใส่ Token ของคุณ
-# REPO_NAME = "bookhub10/models"                  # <- ใส่ชื่อ repo เช่น oakjkp/gru-bot-model
-# GITHUB_BRANCH = "main"                        # สาขา
-
-# ==========================
-# ฟังก์ชันช่วยอัปโหลด GitHub
-# ==========================
-# def upload_to_github(local_path, repo_path, message="Upload model to GitHub"):
-#     """Upload local file to GitHub repo"""
-#     g = Github(GITHUB_TOKEN)
-#     repo = g.get_repo(REPO_NAME)
-#     with open(local_path, "rb") as f:
-#         content = f.read()
-#     try:
-#         repo.create_file(repo_path, message, content, branch=GITHUB_BRANCH)
-#         print(f"Uploaded {local_path} to GitHub as {repo_path}")
-#     except Exception as e:
-#         # ถ้าไฟล์มีอยู่แล้วให้ update แทน
-#         try:
-#             file = repo.get_contents(repo_path, ref=GITHUB_BRANCH)
-#             repo.update_file(file.path, message, content, file.sha, branch=GITHUB_BRANCH)
-#             print(f"Updated {local_path} on GitHub as {repo_path}")
-#         except Exception as e2:
-#             print(f"Error uploading {local_path}: {e2}")
 
 # ==============================================================================
 # PART 1: DATA COLLECTION AND PREPROCESSING
