@@ -51,8 +51,10 @@ scaler = None
 # 🛑 รายชื่อคุณลักษณะ (9 Features)
 REQUIRED_FEATURES = [
     'open', 'high', 'low', 'close', 'tick_volume', 
-    'SMA_10', 'SMA_50', 'Momentum_1', 'High_Low' 
+    'SMA_10', 'SMA_50', 'Momentum_1', 'High_Low',
+    'M30_RSI', 'H1_MA_Trend'
 ]
+
 account_status = {
     'bot_status': 'STOPPED', 
     'balance': 0.0,
@@ -95,45 +97,7 @@ def download_model_assets():
             print(f"❌ Failed to download {output_path}: {e}")
             raise
 
-# --- Download Python Files from GitHub ---
-def download_python_files():
-    """Download the main Python scripts from GitHub."""
-    GITHUB_PYTHON_FILES = {
-        'linux_api': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/linux_api.py',
-            'filename': 'linux_api.py'
-        },
-        'linux_telegram': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/linux_telegram.py',
-            'filename': 'linux_telegram.py'
-        },
-        # Assuming linux_model.py is in the root directory for simplicity.
-        # If it's in a different path, adjust filename here.
-        'linux_model': { 
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/linux_model.py',
-            'filename': 'linux_model.py'
-        }
-    }
 
-    success = True
-    for file_info in GITHUB_PYTHON_FILES.values():
-        url = file_info['url']
-        output_path = file_info['filename']
-
-        try:
-            print(f"⬇️ Downloading {output_path} from GitHub...")
-            response = requests.get(url)
-            response.raise_for_status()
-
-            with open(output_path, 'wb') as f:
-                f.write(response.content)
-
-            print(f"✅ Downloaded: {output_path}")
-        except Exception as e:
-            print(f"❌ Failed to download {output_path}: {e}")
-            success = False
-            # ไม่ throw error เพื่อให้ลองดาวน์โหลดไฟล์อื่นต่อ
-    return success
 
 # --- Asset Management ---
 
@@ -178,66 +142,82 @@ def parse_mql_json(req):
 
 # --- Core Prediction Logic ---
 
+# --- Core Prediction Logic (เวอร์ชัน Multi-Timeframe) ---
+
 def preprocess_and_predict(raw_data):
-    """Processes OHLCV data, runs prediction, and returns signal/probability."""
+    """Processes 3 TFs, runs prediction, and returns signal/probability."""
     global rnn_model, scaler
-    
-    # 1. Convert to DataFrame
-    df = pd.DataFrame(raw_data['ohlcv_data'])
-    
-    # 2. Add Indicators
-    df = add_technical_indicators(df.copy())
-    
-    # 💡 2.5 จัดการค่า NaN และตรวจสอบความยาว (Fix: Not enough valid bars)
-    df = df.dropna()
 
-    # 3. Check for sufficient bars after indicator calculation and dropna
-    if len(df) < Config.SEQUENCE_LENGTH:
-        raise ValueError(f"Not enough valid bars after adding indicators ({len(df)} bars), expected at least {Config.SEQUENCE_LENGTH}.")
+    # 1. 🆕 แปลง JSON 3 ส่วน ให้เป็น DataFrames
+    try:
+        df_m5 = pd.DataFrame(raw_data['m5_data'])
+        df_m30 = pd.DataFrame(raw_data['m30_data'])
+        df_h1 = pd.DataFrame(raw_data['h1_data'])
 
-    # 4. เตรียม Sequence สำหรับ Scaling
-    df_for_scaling = df.iloc[-Config.SEQUENCE_LENGTH:].copy() 
-    
-    # 🛑 เลือกเฉพาะคุณลักษณะที่จำเป็นและเคยเห็นตอน Fit เท่านั้น
+        # ตั้งค่า Index (สำคัญมากสำหรับการ merge)
+        df_m5['time'] = pd.to_datetime(df_m5['time'], unit='s')
+        df_m5.set_index('time', inplace=True)
+
+        df_m30['time'] = pd.to_datetime(df_m30['time'], unit='s')
+        df_m30.set_index('time', inplace=True)
+        # เราต้องการแค่ close จาก M30
+        df_m30 = df_m30[['close']] 
+
+        df_h1['time'] = pd.to_datetime(df_h1['time'], unit='s')
+        df_h1.set_index('time', inplace=True)
+        # เราต้องการแค่ close จาก H1
+        df_h1 = df_h1[['close']] 
+
+    except Exception as e:
+        raise ValueError(f"Failed to parse Multi-Timeframe data. Error: {e}")
+
+    # 2. 🆕 เรียกใช้ฟังก์ชัน add_technical_indicators เวอร์ชันใหม่
+    # (ฟังก์ชันนี้ import มาจาก linux_model.py ที่เราเพิ่งอัปเกรด)
+    df_features = add_technical_indicators(df_m5, df_m30, df_h1)
+
+    # 3. ตรวจสอบความยาว (เหมือนเดิม)
+    if len(df_features) < Config.SEQUENCE_LENGTH:
+        raise ValueError(f"Not enough valid bars after merging TFs ({len(df_features)} bars), expected at least {Config.SEQUENCE_LENGTH}.")
+
+    # 4. เตรียม Sequence สำหรับ Scaling (เหมือนเดิม)
+    df_for_scaling = df_features.iloc[-Config.SEQUENCE_LENGTH:].copy() 
+
+    # 5. 🛑 เลือก 11 ฟีเจอร์ (เหมือนเดิม แต่ตอนนี้ใช้ List ใหม่)
     final_features = [col for col in REQUIRED_FEATURES if col in df_for_scaling.columns]
-    
-    # Sanity check for feature count
+
     if len(final_features) != len(REQUIRED_FEATURES):
         missing = set(REQUIRED_FEATURES) - set(final_features)
-        raise ValueError(f"Feature Mismatch: Found {len(final_features)} features, but expected {len(REQUIRED_FEATURES)}. Missing: {missing}")
+        raise ValueError(f"Feature Mismatch: Expected {len(REQUIRED_FEATURES)} features. Missing: {missing}")
 
     df_for_scaling_trimmed = df_for_scaling[final_features]
-    
+
     try:
-        # ใช้ df_for_scaling_trimmed ในการ Scaling
-        # scale_features จะใช้ scaler.transform()
+        # 6. Scaling (เหมือนเดิม)
         _, test_scaled, _ = scale_features(
-            df_for_scaling_trimmed, # ใช้ข้อมูลทั้งหมดเป็นชุดที่จะ scale
+            df_for_scaling_trimmed,
             test_df=None,
             scaler=scaler
         )
     except Exception as e:
-        raise ValueError(f"Scaling failed. Error: {e}")
+        raise ValueError(f"Scaling failed (check feature count: {len(final_features)}). Error: {e}")
 
-    # 5. Prepare Sequence for Prediction
+    # 7. Prepare Sequence (เหมือนเดิม)
     X_pred_data = test_scaled.values 
-    # X_pred ควรใช้ข้อมูลทั้งหมดที่ scale แล้ว
     X_pred = np.array([X_pred_data]) 
 
-    # 6. Predict
+    # 8. Predict (เหมือนเดิม)
     prediction = rnn_model.predict(X_pred, verbose=0)[0][0]
-    
-    # 7. Determine Signal
+
+    # 9. Determine Signal (เหมือนเดิม)
     signal = 'NONE'
     if prediction >= Config.BUY_THRESHOLD:
         signal = 'BUY'
-    elif (1 - prediction) >= Config.SELL_THRESHOLD: # 💡 ตรวจสอบ SELL (ถ้าโมเดล 0-1 หมายถึง 0=SELL, 1=BUY)
+    elif (1 - prediction) >= Config.SELL_THRESHOLD:
         signal = 'SELL'
-    
-    account_status['last_signal'] = signal
-    
-    return signal, prediction
 
+    account_status['last_signal'] = signal
+
+    return signal, prediction
 
 # --- API Endpoints ---
 
@@ -360,10 +340,10 @@ def update_expert_advisor():
     Downloads the latest .mq5 file from GitHub and recompiles it.
     """
     # 🛑 (ต้องแก้ไข) ใส่ URL ของไฟล์ .mq5 ของคุณใน GitHub
-    EA_URL = 'https://raw.githubusercontent.com/bookhub10/models/main/linux_OBot.mq5' 
+    EA_URL = 'https://raw.githubusercontent.com/bookhub10/models/main/Obot.mq5' 
     
     # 🛑 (ต้องแก้ไข) ใส่ Path ไปยังไฟล์ .mq5 ในเครื่อง Xubuntu
-    EA_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/OBotTrading.mq5"
+    EA_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/Obot.mq5"
     
     # 🛑 (ต้องแก้ไข) ใส่ Path ไปยัง metaeditor64.exe
     METAEDITOR_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/metaeditor64.exe"
@@ -391,7 +371,7 @@ def update_expert_advisor():
         # รันคำสั่งคอมไพล์ผ่าน Wine
         # เราใช้ /compile:"<path_in_wine>"
         # C:\Program Files\MetaTrader 5\MQL5\Experts\Obot.mq5
-        wine_ea_path = "C:\\Program Files\\MetaTrader 5\\MQL5\\Experts\\OBotTrading.mq5"
+        wine_ea_path = "C:\\Program Files\\MetaTrader 5\\MQL5\\Experts\\Obot.mq5"
         
         compile_command = [
             "wine", 
@@ -424,35 +404,6 @@ def update_and_reboot():
     except Exception as e:
         print(f"❌ Error in /reboot: {e}")
         return jsonify({'status': 'FAIL', 'message': str(e)}), 500
-        
-# 🆕 เพิ่ม Endpoint /fix
-@app.route('/fix', methods=['POST'])
-def fix_system_files():
-    """Downloads updated Python scripts and reloads model assets."""
-    # 1. ดาวน์โหลดไฟล์ Python ใหม่
-    python_downloaded = download_python_files()
-
-    # 2. ดาวน์โหลดโมเดลและ scaler ใหม่ (เหมือนกับการ retrain)
-    try:
-        download_model_assets()
-    except Exception as e:
-        return jsonify({'status': 'FAIL', 'message': f'❌ Failed to download model assets: {str(e)}. Python files may be updated.'}), 500
-        
-    # 3. โหลดโมเดลและ Scaler เข้า memory
-    assets_loaded = load_assets()
-    
-    message = "✅ System files and assets updated successfully."
-    
-    if not python_downloaded:
-        message = "⚠️ Python files update failed for one or more files. Assets reloaded."
-
-    if not assets_loaded:
-        return jsonify({'status': 'FAIL', 'message': '⚠️ Assets downloaded but failed to load into memory. System files updated. **Please manually restart the server.**'}), 500
-
-    return jsonify({
-        'status': 'SUCCESS', 
-        'message': f'{message} **Requires Server Restart** for new Python files to take effect.'
-    }), 200
 
 # --- Server Run ---
 if __name__ == '__main__':

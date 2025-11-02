@@ -11,7 +11,8 @@ input int    MagicNumber  = 12345;
 input double Lots         = 0.01;
 input double ProbThreshold = 0.50; // minimum probability to act on signal
 input int    MinTradeIntervalMins = 1; // minimum minutes between trades
-
+input int    StopLossPoints = 1500; // SL (Points)
+input int    TakeProfitPoints = 3000; // TP (Points)
 //--- Global Variables
 string BotStatus = "STOPPED"; // สถานะที่ควบคุมจาก API /command
 string LastSignal = "NONE";
@@ -119,21 +120,28 @@ void OnTick()
 
                 if (!hasPosition)
                 {
-                    if (LastProbability < ProbThreshold)
+                    // 1. ตรวจสอบ Probability ของ BUY
+                    if (signal == "BUY" && LastProbability < ProbThreshold)
                     {
-                        Print("DEBUG: Skipping ", signal, " - probability below threshold (", DoubleToString(LastProbability,6), ").");
+                        Print("DEBUG: Skipping BUY - probability (", DoubleToString(LastProbability,6), ") < threshold (", DoubleToString(ProbThreshold,2), ").");
                     }
+                    // 2. ตรวจสอบ Probability ของ SELL (ต้องใช้ 1.0 ลบ)
+                    else if (signal == "SELL" && (1.0 - LastProbability) < ProbThreshold)
+                    {
+                        // คำนวณ Prob ของ SELL เพื่อแสดงผล
+                        double sell_prob = 1.0 - LastProbability;
+                        Print("DEBUG: Skipping SELL - probability (", DoubleToString(sell_prob,6), ") < threshold (", DoubleToString(ProbThreshold,2), ").");
+                    }
+                    // 3. ตรวจสอบเงื่อนไขอื่นๆ (เหมือนเดิม)
                     else if (secondsSinceLast < MinTradeIntervalMins * 60)
                     {
                         Print("DEBUG: Skipping ", signal, " - within MinTradeInterval (", IntegerToString(secondsSinceLast), "s).");
                     }
+                    // 4. ถ้าผ่านหมด ให้เทรด
                     else
                     {
                         Print("DEBUG: Conditions met - attempting ExecuteTrade(\"", signal, "\").");
                         ExecuteTrade(signal);
-                        // 🚨 หมายเหตุ: LastSignalTime จะถูกอัปเดตใน ExecuteTrade หากส่งคำสั่งสำเร็จ 
-                        // หากต้องการความรวดเร็วในการป้องกันการส่งคำสั่งซ้ำให้ย้ายมาอัปเดตตรงนี้:
-                        // LastSignalTime = now; 
                     }
                 }
                 else
@@ -189,25 +197,22 @@ void CheckBotStatus()
 }
 
 // (B) Get XAUUSD Data in JSON format
-string GetXAUUSDDataJSON(int bars)
+// 🛑 [ฟังก์ชันใหม่ที่ 1] - ฟังก์ชันช่วยดึงข้อมูล
+// เราสร้างฟังก์ชันนี้ขึ้นมาเพื่อลดการเขียนโค้ดซ้ำ
+string GetRatesJSON(ENUM_TIMEFRAMES timeframe, int bars)
 {
     MqlRates rates[];
-    int copied = CopyRates(_Symbol, PERIOD_M5, 0, bars, rates);
+    int copied = CopyRates(_Symbol, timeframe, 0, bars, rates);
     if (copied <= 0)
     {
-        Print("❌ GetXAUUSDDataJSON: CopyRates failed, copied=", copied);
-        return "{}"; // Error
+        Print("❌ GetRatesJSON: CopyRates failed for ", EnumToString(timeframe));
+        return "[]"; // ส่ง Array ว่างเปล่า
     }
 
-    // Log how many bars were actually copied (helps debug server-side insufficient-data issues)
-    Print("DEBUG: GetXAUUSDDataJSON requested=", bars, " copied=", copied);
-
     string json_array = "[";
-    // CopyRates returns bars with index 0 = most recent. Python expects oldest-first (time increasing).
-    // Iterate from the oldest available element (copied-1) down to 0 and append so the JSON array is oldest->newest.
+    // เรียงข้อมูลจากเก่า -> ใหม่
     for(int idx = copied - 1, j = 0; idx >= 0; idx--, j++)
     {
-        // สร้าง JSON object สำหรับแต่ละแท่งเทียน (เรียงจากเก่->ใหม่)
         string item = StringFormat(
             "{\"time\":%d, \"open\":%.5f, \"high\":%.5f, \"low\":%.5f, \"close\":%.5f, \"tick_volume\":%d}",
             (long)rates[idx].time, rates[idx].open, rates[idx].high, rates[idx].low, rates[idx].close, rates[idx].tick_volume);
@@ -216,9 +221,33 @@ string GetXAUUSDDataJSON(int bars)
         if (j < copied - 1) json_array += ",";
     }
     json_array += "]";
+    return json_array;
+}
+
+
+// 🛑 [ฟังก์ชันใหม่ที่ 2] - แทนที่ GetXAUUSDDataJSON เดิมทั้งหมด
+// (B) Get XAUUSD Data in JSON format (Multi-Timeframe Version)
+string GetXAUUSDDataJSON(int m5_bars)
+{
+    // 1. ดึงข้อมูล M5 (เหมือนเดิม 150 แท่ง)
+    string m5_json = GetRatesJSON(PERIOD_M5, m5_bars);
     
-    // รวมให้อยู่ในรูปแบบที่ API ต้องการ: {"ohlcv_data": [...]}
-    string final_json = "{\"ohlcv_data\":" + json_array + "}";
+    // 2. 🆕 ดึงข้อมูล M30 
+    // เราต้องการข้อมูล M30 ย้อนหลังเล็กน้อยเพื่อให้แน่ใจว่า RSI(14) คำนวณได้
+    string m30_json = GetRatesJSON(PERIOD_M30, 50); // ดึง M30 50 แท่ง
+    
+    // 3. 🆕 ดึงข้อมูล H1
+    // เราต้องการข้อมูล H1 ย้อนหลังเพื่อให้แน่ใจว่า MA(200) คำนวณได้
+    string h1_json = GetRatesJSON(PERIOD_H1, 250); // ดึง H1 250 แท่ง
+    
+    // 4. 🆕 ประกอบร่าง JSON ใหม่
+    string final_json = StringFormat(
+        "{\"m5_data\":%s, \"m30_data\":%s, \"h1_data\":%s}",
+        m5_json,
+        m30_json,
+        h1_json
+    );
+    
     return final_json;
 }
 
@@ -308,9 +337,6 @@ void ExecuteTrade(string signal)
     request.magic     = MagicNumber;
     request.type_filling = ORDER_FILLING_FOK;    // Immediate-Or-Cancel (ปลอดภัยสำหรับ market orders)
     request.type_time    = ORDER_TIME_GTC;       // Good Till Canceled (ไม่มีวันหมดอายุ)
-    
-    int sl_points = 1500;
-    int tp_points = 3000;
 
     int min_stop_points = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
     // 🛑 แก้ไข: ใช้ MathMax(1, ...) เพื่อรับประกันว่า min_stop_points เป็นอย่างน้อย 1
@@ -346,8 +372,8 @@ void ExecuteTrade(string signal)
         request.price = tick.ask; // ✅ ถูกต้อง: ใช้ ASK สำหรับ BUY
         
         // Calculate SL/TP for BUY
-        request.sl = NormalizeDouble(request.price - (sl_points * _Point), _Digits);
-        request.tp = NormalizeDouble(request.price + (tp_points * _Point), _Digits);
+        request.sl = NormalizeDouble(request.price - (StopLossPoints * _Point), _Digits); // ⬅️ เปลี่ยนชื่อ
+        request.tp = NormalizeDouble(request.price + (TakeProfitPoints * _Point), _Digits); // ⬅️ เปลี่ยนชื่อ
         
         // Adjust SL/TP
         if (request.price - request.sl < min_stop_price_dist)
@@ -374,8 +400,8 @@ void ExecuteTrade(string signal)
         request.price = tick.bid; // ✅ แก้ไข: ใช้ BID สำหรับ SELL
         
         // Calculate SL/TP for SELL
-        request.sl = NormalizeDouble(request.price + (sl_points * _Point), _Digits);
-        request.tp = NormalizeDouble(request.price - (tp_points * _Point), _Digits);
+        request.sl = NormalizeDouble(request.price + (StopLossPoints * _Point), _Digits); // ⬅️ เปลี่ยนชื่อ
+        request.tp = NormalizeDouble(request.price - (TakeProfitPoints * _Point), _Digits); // ⬅️ เปลี่ยนชื่อ
         
         // Adjust SL/TP
         if (request.sl - request.price < min_stop_price_dist)
