@@ -394,15 +394,18 @@ def update_expert_advisor():
         traceback.print_exc()
         return jsonify({'status': 'FAIL', 'message': f'Error during EA update: {str(e)}'}), 500
 
-@app.route('/reboot', methods=['POST'])
-def update_and_reboot():
+@app.route('/restart_api', methods=['POST'])
+def restart_api_service():
+    """Endpoint to restart the API service via systemd."""
     try:
-        subprocess.run(["sudo", "/sbin/reboot"])
+        # นี่คือคำสั่งที่ปลอดภัยกว่า
+        # (เราจะตั้งค่า sudoers ในขั้นตอนถัดไป)
+        command = ["sudo", "/bin/systemctl", "restart", "obot_api.service"]
+        subprocess.run(command)
         
-        return jsonify({'status': 'SUCCESS', 'message': 'EA Downloaded. System is rebooting.'}), 200
-
+        return jsonify({'status': 'SUCCESS', 'message': 'API service restart command issued.'}), 200
     except Exception as e:
-        print(f"❌ Error in /reboot: {e}")
+        print(f"❌ Error in /restart_api: {e}")
         return jsonify({'status': 'FAIL', 'message': str(e)}), 500
 
 # --- Server Run ---
