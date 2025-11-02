@@ -14,7 +14,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 import tensorflow as tf
-
+import talib
 # ==============================================================================
 # PART 1: DATA COLLECTION AND PREPROCESSING
 # ==============================================================================
@@ -60,28 +60,45 @@ import tensorflow as tf
 # 🛑 A. ADD TECHNICAL INDICATORS (ตาม Obot_model) 🛑
 def add_technical_indicators(df):
     """
-    Adds necessary technical indicators (MUST match the final trained model: 9 features).
+    Adds necessary technical indicators using TA-Lib (MUST match the final model: 9 features).
     """
     
-    # 1. Simple Moving Average (SMA 10 and 50)
-    df['SMA_10'] = df['close'].rolling(window=10).mean()
-    df['SMA_50'] = df['close'].rolling(window=50).mean()
+    # ตรวจสอบว่า df ไม่ใช่ read-only (บางครั้ง Pandas copy มาแล้วเป็น)
+    df = df.copy()
 
-    # 2. Momentum / RSI Proxy
-    df['Momentum_1'] = df['close'].diff(1)
+    # 1. เตรียมข้อมูลสำหรับ TA-Lib
+    # TA-Lib ต้องการ numpy array ชนิด float64
+    close_prices = df['close'].values.astype(np.float64)
+    high_prices = df['high'].values.astype(np.float64)
+    low_prices = df['low'].values.astype(np.float64)
 
-    # 3. Price Range / ATR Proxy
+    # 2. Simple Moving Average (SMA 10 and 50)
+    df['SMA_10'] = talib.SMA(close_prices, timeperiod=10)
+    df['SMA_50'] = talib.SMA(close_prices, timeperiod=50)
+
+    # 3. Momentum (1-period)
+    # talib.MOM(timeperiod=1) จะเทียบ close[i] กับ close[i-1] ซึ่งเทียบเท่ากับ pandas.diff(1)
+    df['Momentum_1'] = talib.MOM(close_prices, timeperiod=1)
+
+    # 4. Price Range (High - Low)
+    # อันนี้ใช้ Pandas ธรรมดาได้เลย เพราะตรงไปตรงมา
     df['High_Low'] = df['high'] - df['low']
-
-    # Remove rows with NaN created by rolling windows (e.g., first 50 rows)
+    
+    # 5. Remove rows with NaN 
+    # (TA-Lib จะสร้าง NaN ในช่วงแรก เช่น 50 แถวแรกของ SMA_50)
     df.dropna(inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    # 🛑 Select only the 9 features (Base 5 + Indicators 4)
+    # 6. 🛑 เลือกเฉพาะ 9 features ที่จะใช้จริง
     feature_cols = ['open', 'high', 'low', 'close', 'tick_volume', 
                     'SMA_10', 'SMA_50', 'Momentum_1', 'High_Low']
     
-    df = df[feature_cols].copy()
+    # ตรวจสอบเผื่อมีคอลัมน์หาย
+    final_cols = [col for col in feature_cols if col in df.columns]
+    if len(final_cols) != len(feature_cols):
+        print(f"Warning: Missing columns! Expected {feature_cols}, found {final_cols}")
+        
+    df = df[final_cols].copy()
     
     return df
 
