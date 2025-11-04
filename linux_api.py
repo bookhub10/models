@@ -381,11 +381,7 @@ def update_expert_advisor():
     EA_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/OBotTrading.mq5"
     METAEDITOR_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/metaeditor64.exe"
     WINEPREFIX_PATH = "/home/hp/.mt5"
-
     COMPILE_LOG_PATH = "/home/hp/Downloads/bot/logs/compile.log"
-
-    # --- ⬇️ 1. เพิ่มบรรทัดนี้ ⬇️ ---
-    # ดึงชื่อโฟลเดอร์ (logs) จาก Path เต็ม
     LOG_DIR = os.path.dirname(COMPILE_LOG_PATH) 
 
     try:
@@ -397,10 +393,16 @@ def update_expert_advisor():
             f.write(response.content)
         print("✅ EA Downloaded.")
 
-        # 2. เตรียมคำสั่ง Compile (เหมือนเดิม)
+        # 2. เตรียมคำสั่ง Compile
         print(f"⚙️ Compiling {EA_PATH}...")
+
+        # --- ⬇️ 1. [THE FIX] ⬇️ ---
+        # เราต้องบอก Wine ว่าจะใช้หน้าจอไหน (Display)
         env = os.environ.copy()
         env['WINEPREFIX'] = WINEPREFIX_PATH
+        env['DISPLAY'] = ':0' # ⬅️ บรรทัดนี้คือหัวใจสำคัญ
+        # --- ⬆️ [THE FIX] ⬆️ ---
+
         wine_ea_path = "C:\\Program Files\\MetaTrader 5\\MQL5\\Experts\\OBotTrading.mq5"
         compile_command = [
             "wine", 
@@ -408,15 +410,16 @@ def update_expert_advisor():
             f'/compile:"{wine_ea_path}"'
         ]
 
-        # 3. 🛑 [THE FIX] 🛑
-
-        # --- ⬇️ 2. เพิ่มบรรทัดนี้ ⬇️ ---
-        # สร้างโฟลเดอร์ /logs ถ้ายังไม่มี
+        # 3. สร้างโฟลเดอร์ logs (เหมือนเดิม)
         os.makedirs(LOG_DIR, exist_ok=True) 
 
-        print("✅ Issuing non-blocking compile command...")
+        print("✅ Issuing non-blocking compile command with DISPLAY=:0...")
         with open(COMPILE_LOG_PATH, 'w') as log_file:
-            subprocess.Popen(compile_command, env=env, stdout=log_file, stderr=log_file)
+
+            # --- ⬇️ 2. [THE FIX] ⬇️ ---
+            # ส่ง 'env=env' (ที่เราเพิ่งแก้ไข) เข้าไปด้วย
+            subprocess.Popen(compile_command, env=env, stdout=log_file, stderr=log_file) 
+            # --- ⬆️ [THE FIX] ⬆️ ---
 
         # 4. ตอบกลับ Telegram ทันที
         return jsonify({
