@@ -377,47 +377,47 @@ def update_expert_advisor():
     """
     Downloads the latest .mq5 file and recompiles it ASYNCHRONOUSLY.
     """
-    # 🛑 (ตรวจสอบ) Path เหล่านี้ของคุณถูกต้องหรือไม่
     EA_URL = 'https://raw.githubusercontent.com/bookhub10/models/main/linux_OBot.mq5' 
     EA_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/OBotTrading.mq5"
     METAEDITOR_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/metaeditor64.exe"
     WINEPREFIX_PATH = "/home/hp/.mt5"
-    
-    # 🛑 [NEW] เราจะเก็บ Log การ Compile ไว้ที่นี่
+
     COMPILE_LOG_PATH = "/home/hp/Downloads/bot/logs/compile.log"
 
+    # --- ⬇️ 1. เพิ่มบรรทัดนี้ ⬇️ ---
+    # ดึงชื่อโฟลเดอร์ (logs) จาก Path เต็ม
+    LOG_DIR = os.path.dirname(COMPILE_LOG_PATH) 
+
     try:
-        # 1. ดาวน์โหลดไฟล์ EA (ยังเหมือนเดิม)
+        # 1. ดาวน์โหลดไฟล์ EA (เหมือนเดิม)
         print(f"⬇️ Downloading new EA from {EA_URL}...")
         response = requests.get(EA_URL)
         response.raise_for_status()
-
         with open(EA_PATH, 'wb') as f:
             f.write(response.content)
         print("✅ EA Downloaded.")
 
-        # 2. เตรียมคำสั่ง Compile (ยังเหมือนเดิม)
+        # 2. เตรียมคำสั่ง Compile (เหมือนเดิม)
         print(f"⚙️ Compiling {EA_PATH}...")
         env = os.environ.copy()
         env['WINEPREFIX'] = WINEPREFIX_PATH
-        
-        # 🛑 (ตรวจสอบ) ชื่อไฟล์ใน Path นี้ต้องตรงกับ EA_PATH 
-        # C:\Program Files\MetaTrader 5\MQL5\Experts\OBotTrading.mq5
         wine_ea_path = "C:\\Program Files\\MetaTrader 5\\MQL5\\Experts\\OBotTrading.mq5"
-        
         compile_command = [
             "wine", 
             METAEDITOR_PATH, 
             f'/compile:"{wine_ea_path}"'
         ]
-        
+
         # 3. 🛑 [THE FIX] 🛑
-        # ใช้ Popen (ยิงแล้วทิ้ง) แทน .run (รอให้เสร็จ)
-        # เราจะส่ง Output (stdout/stderr) ไปที่ไฟล์ Log แทน
+
+        # --- ⬇️ 2. เพิ่มบรรทัดนี้ ⬇️ ---
+        # สร้างโฟลเดอร์ /logs ถ้ายังไม่มี
+        os.makedirs(LOG_DIR, exist_ok=True) 
+
         print("✅ Issuing non-blocking compile command...")
         with open(COMPILE_LOG_PATH, 'w') as log_file:
             subprocess.Popen(compile_command, env=env, stdout=log_file, stderr=log_file)
-        
+
         # 4. ตอบกลับ Telegram ทันที
         return jsonify({
             'status': 'SUCCESS', 
