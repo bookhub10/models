@@ -434,18 +434,21 @@ def update_expert_advisor():
 
 @app.route('/restart', methods=['POST'])
 def restart_service():
-    """Endpoint to restart the API service via systemd."""
+    """Endpoint to restart the service via systemd."""
     try:
         # นี่คือคำสั่งที่ปลอดภัยกว่า
         # (เราจะตั้งค่า sudoers ในขั้นตอนถัดไป)
         command = ["sudo", "/bin/systemctl", "restart", "obot_api.service"]
         command2 = ["sudo", "/bin/systemctl", "restart", "obot_telegram.service"]
+        command3 = ["sudo", "/bin/systemctl", "restart", "obot_mt5.service"]
+
+        subprocess.run(command3)
         subprocess.run(command2)
         subprocess.run(command)
         
-        return jsonify({'status': 'SUCCESS', 'message': 'API service restart command issued.'}), 200
+        return jsonify({'status': 'SUCCESS', 'message': 'The service restart command issued.'}), 200
     except Exception as e:
-        print(f"❌ Error in /restart_api: {e}")
+        print(f"❌ Error in /restart: {e}")
         return jsonify({'status': 'FAIL', 'message': str(e)}), 500
 
 

@@ -113,7 +113,7 @@ async def help_command(update, context):
         "/fix - Download and reload system files\n"
         "/retrain - Retrain in background\n"
         "/update - Updating EA\n"
-        "/reboot - Restarting System\n"
+        "/restart - Restarting All System\n"
         "/help - Show CCOBOT\n"
         "------------------------------------"
     )
@@ -165,13 +165,13 @@ async def restart_command(update, context):
     """Handles /restart command to restart the API service."""
     if update.effective_chat.id != CHAT_ID: return 
     
-    await update.message.reply_text("⏳ Requesting API Service RESTART...", parse_mode='Markdown')
+    await update.message.reply_text("⏳ Requesting Service RESTART...", parse_mode='Markdown')
     
     response = requests.post(f'{API_URL}/restart')
     if response.status_code == 200:
-        message = "✅ **API Service Restarted!**\nService is restarting in the background."
+        message = "✅ **The Service Restarted!**\nService is restarting in the background."
     else:
-        message = f"❌ **Error Restarting API**"
+        message = f"❌ **Error Restarting**"
         
     await update.message.reply_text(message, parse_mode='Markdown')
     
@@ -209,7 +209,7 @@ def main():
     application.add_handler(CommandHandler("status", status_command)) 
     application.add_handler(CommandHandler("retrain", retrain_command))  
     application.add_handler(CommandHandler("update", update_command))
-    application.add_handler(CommandHandler("reboot", restart_command))
+    application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("fix", fix_command))
     application.add_handler(CommandHandler("help", help_command))
     # Start the Bot 
