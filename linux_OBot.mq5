@@ -96,8 +96,8 @@ void OnTick()
         
         if (BotStatus == "RUNNING")
         {
-            // 3. ดึงข้อมูล OHLCV ล่าสุด
-            int requestBars = MathMax(LookbackBars, 100) + 50; 
+            // โค้ดใหม่ (ขอเผื่อเป็น 200 แท่ง)
+            int requestBars = MathMax(LookbackBars, 100) + 100; 
             string data_json = GetXAUUSDDataJSON(requestBars);
             
             // 4. ส่งข้อมูลไปยัง Flask API และรับสัญญาณ
@@ -233,8 +233,8 @@ string GetXAUUSDDataJSON(int m5_bars)
     string m5_json = GetRatesJSON(PERIOD_M5, m5_bars);
     
     // 2. 🆕 ดึงข้อมูล M30 
-    // เราต้องการข้อมูล M30 ย้อนหลังเล็กน้อยเพื่อให้แน่ใจว่า RSI(14) คำนวณได้
-    string m30_json = GetRatesJSON(PERIOD_M30, 50); // ดึง M30 50 แท่ง
+    // โค้ดใหม่ (ขอเผื่อเป็น 70 แท่ง)
+    string m30_json = GetRatesJSON(PERIOD_M30, 70); // ดึง M30 70 แท่งแท่ง
     
     // 3. 🆕 ดึงข้อมูล H1
     // เราต้องการข้อมูล H1 ย้อนหลังเพื่อให้แน่ใจว่า MA(200) คำนวณได้
@@ -335,7 +335,7 @@ void ExecuteTrade(string signal)
     request.volume    = volume;
     request.deviation = 50;
     request.magic     = MagicNumber;
-    request.type_filling = ORDER_FILLING_FOK;    // Immediate-Or-Cancel (ปลอดภัยสำหรับ market orders)
+    request.type_filling = ORDER_FILLING_IOC;
     request.type_time    = ORDER_TIME_GTC;       // Good Till Canceled (ไม่มีวันหมดอายุ)
 
     int min_stop_points = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
