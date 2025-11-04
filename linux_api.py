@@ -375,17 +375,15 @@ def retrain_model_async():
 @app.route('/update_ea', methods=['POST'])
 def update_expert_advisor():
     """
-    Downloads the latest .mq5 file and recompiles it ASYNCHRONOUSLY.
+    [NEW VERSION] Downloads the EA and creates a trigger file.
+    The actual compile is handled by linux_compiler.py (GUI Watcher).
     """
     EA_URL = 'https://raw.githubusercontent.com/bookhub10/models/main/linux_OBot.mq5' 
     EA_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/OBotTrading.mq5"
-    METAEDITOR_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/metaeditor64.exe"
-    WINEPREFIX_PATH = "/home/hp/.mt5"
-    COMPILE_LOG_PATH = "/home/hp/Downloads/bot/logs/compile.log"
-    LOG_DIR = os.path.dirname(COMPILE_LOG_PATH) 
+    TRIGGER_FILE = "/home/hp/Downloads/bot/COMPILE_NOW.trigger" # ⬅️ ไฟล์สัญญาณ
 
     try:
-        # 1. ดาวน์โหลดไฟล์ EA (เหมือนเดิม)
+        # 1. ดาวน์โหลดไฟล์ EA
         print(f"⬇️ Downloading new EA from {EA_URL}...")
         response = requests.get(EA_URL)
         response.raise_for_status()
@@ -393,38 +391,15 @@ def update_expert_advisor():
             f.write(response.content)
         print("✅ EA Downloaded.")
 
-        # 2. เตรียมคำสั่ง Compile
-        print(f"⚙️ Compiling {EA_PATH}...")
+        # 2. 🛑 [THE FIX] 🛑
+        # สร้างไฟล์ Trigger เพื่อให้ "Watcher" ที่หน้าจอทำงาน
+        with open(TRIGGER_FILE, 'w') as f:
+            f.write('triggered') # เขียนอะไรก็ได้ลงไป
+        print(f"✅ Trigger file created at {TRIGGER_FILE}")
 
-        # --- ⬇️ 1. [THE FIX] ⬇️ ---
-        # เราต้องบอก Wine ว่าจะใช้หน้าจอไหน (Display)
-        env = os.environ.copy()
-        env['WINEPREFIX'] = WINEPREFIX_PATH
-        env['DISPLAY'] = ':0' # ⬅️ บรรทัดนี้คือหัวใจสำคัญ
-        # --- ⬆️ [THE FIX] ⬆️ ---
-
-        wine_ea_path = "C:\\Program Files\\MetaTrader 5\\MQL5\\Experts\\OBotTrading.mq5"
-        compile_command = [
-            "wine", 
-            METAEDITOR_PATH, 
-            f'/compile:"{wine_ea_path}"'
-        ]
-
-        # 3. สร้างโฟลเดอร์ logs (เหมือนเดิม)
-        os.makedirs(LOG_DIR, exist_ok=True) 
-
-        print("✅ Issuing non-blocking compile command with DISPLAY=:0...")
-        with open(COMPILE_LOG_PATH, 'w') as log_file:
-
-            # --- ⬇️ 2. [THE FIX] ⬇️ ---
-            # ส่ง 'env=env' (ที่เราเพิ่งแก้ไข) เข้าไปด้วย
-            subprocess.Popen(compile_command, env=env, stdout=log_file, stderr=log_file) 
-            # --- ⬆️ [THE FIX] ⬆️ ---
-
-        # 4. ตอบกลับ Telegram ทันที
         return jsonify({
             'status': 'SUCCESS', 
-            'message': f'✅ Compile command issued! Check logs/compile.log for results.'
+            'message': f'✅ EA Downloaded. Compile trigger issued to GUI watcher.'
         }), 200
 
     except Exception as e:
