@@ -375,22 +375,19 @@ def retrain_model_async():
 @app.route('/update_ea', methods=['POST'])
 def update_expert_advisor():
     """
-    Downloads the latest .mq5 file from GitHub and recompiles it.
+    Downloads the latest .mq5 file and recompiles it ASYNCHRONOUSLY.
     """
-    # 🛑 (ต้องแก้ไข) ใส่ URL ของไฟล์ .mq5 ของคุณใน GitHub
+    # 🛑 (ตรวจสอบ) Path เหล่านี้ของคุณถูกต้องหรือไม่
     EA_URL = 'https://raw.githubusercontent.com/bookhub10/models/main/linux_OBot.mq5' 
-    
-    # 🛑 (ต้องแก้ไข) ใส่ Path ไปยังไฟล์ .mq5 ในเครื่อง Xubuntu
     EA_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/OBotTrading.mq5"
-    
-    # 🛑 (ต้องแก้ไข) ใส่ Path ไปยัง metaeditor64.exe
     METAEDITOR_PATH = "/home/hp/.mt5/drive_c/Program Files/MetaTrader 5/metaeditor64.exe"
-    
-    # 🛑 (ต้องแก้ไข) ใส่ Path ไปยัง WINEPREFIX
     WINEPREFIX_PATH = "/home/hp/.mt5"
+    
+    # 🛑 [NEW] เราจะเก็บ Log การ Compile ไว้ที่นี่
+    COMPILE_LOG_PATH = "/home/hp/Downloads/bot/logs/compile.log"
 
     try:
-        # 1. ดาวน์โหลดไฟล์ EA ใหม่
+        # 1. ดาวน์โหลดไฟล์ EA (ยังเหมือนเดิม)
         print(f"⬇️ Downloading new EA from {EA_URL}...")
         response = requests.get(EA_URL)
         response.raise_for_status()
@@ -399,16 +396,13 @@ def update_expert_advisor():
             f.write(response.content)
         print("✅ EA Downloaded.")
 
-        # 2. สั่งคอมไพล์ไฟล์ (ส่วนที่สำคัญที่สุด)
+        # 2. เตรียมคำสั่ง Compile (ยังเหมือนเดิม)
         print(f"⚙️ Compiling {EA_PATH}...")
-        
-        # ตั้งค่า Environment สำหรับ Wine
         env = os.environ.copy()
         env['WINEPREFIX'] = WINEPREFIX_PATH
         
-        # รันคำสั่งคอมไพล์ผ่าน Wine
-        # เราใช้ /compile:"<path_in_wine>"
-        # C:\Program Files\MetaTrader 5\MQL5\Experts\Obot.mq5
+        # 🛑 (ตรวจสอบ) ชื่อไฟล์ใน Path นี้ต้องตรงกับ EA_PATH 
+        # C:\Program Files\MetaTrader 5\MQL5\Experts\OBotTrading.mq5
         wine_ea_path = "C:\\Program Files\\MetaTrader 5\\MQL5\\Experts\\OBotTrading.mq5"
         
         compile_command = [
@@ -417,15 +411,18 @@ def update_expert_advisor():
             f'/compile:"{wine_ea_path}"'
         ]
         
-        # ใช้ subprocess.run เพื่อรัน
-        result = subprocess.run(compile_command, env=env, capture_output=True, text=True)
-
-        if result.returncode == 0:
-            print("✅ EA Compiled successfully.")
-            return jsonify({'status': 'SUCCESS', 'message': '✅ EA Updated and Recompiled successfully.'}), 200
-        else:
-            print(f"❌ EA Compile Error: {result.stderr}")
-            return jsonify({'status': 'FAIL', 'message': f'EA Compile Error: {result.stderr}'}), 500
+        # 3. 🛑 [THE FIX] 🛑
+        # ใช้ Popen (ยิงแล้วทิ้ง) แทน .run (รอให้เสร็จ)
+        # เราจะส่ง Output (stdout/stderr) ไปที่ไฟล์ Log แทน
+        print("✅ Issuing non-blocking compile command...")
+        with open(COMPILE_LOG_PATH, 'w') as log_file:
+            subprocess.Popen(compile_command, env=env, stdout=log_file, stderr=log_file)
+        
+        # 4. ตอบกลับ Telegram ทันที
+        return jsonify({
+            'status': 'SUCCESS', 
+            'message': f'✅ Compile command issued! Check logs/compile.log for results.'
+        }), 200
 
     except Exception as e:
         print(f"❌ Error in /update_ea: {e}")
