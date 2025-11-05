@@ -12,15 +12,21 @@ input double Lots         = 0.01;
 input double ProbThreshold = 0.50; // minimum probability to act on signal
 input int    MinTradeIntervalMins = 1; // minimum minutes between trades
 
+// --- ⬇️ เพิ่ม 2 บรรทัดนี้ ⬇️ ---
+input double SL_Multiplier = 2.0; // SL = ATR * 2.0
+input double TP_Multiplier = 3.0; // TP = ATR * 3.0
+
 //--- Global Variables
 string BotStatus = "STOPPED"; 
 string LastSignal = "NONE";
 datetime LastSignalTime = 0;
 double LastProbability = 0.0;
 
-// --- ⬇️ เพิ่ม 2 บรรทัดนี้ ⬇️ ---
-double LastSLPrice = 0.0; // SL ที่ได้จาก API
-double LastTPPrice = 0.0; // TP ที่ได้จาก API
+double LastProbability = 0.0;
+
+// --- ⬇️ แก้ไข 2 บรรทัดนี้ ⬇️ ---
+double LastATR = 0.0; // ATR ที่ได้จาก API
+// (ลบ LastSLPrice และ LastTPPrice ทิ้งไปเลย)
 
 //--- MQL5 JSON Utilities (Basic Implementation)
 // Function to safely extract a string value from a JSON response
@@ -254,7 +260,7 @@ string GetXAUUSDDataJSON(int m5_bars)
     return final_json;
 }
 
-// --- 🛑 [แทนที่ฟังก์ชันนี้] 🛑 ---
+// --- 🛑 [แทนที่ฟังก์ชันนี้] (เวอร์ชันอ่าน ATR) 🛑 ---
 // (C) Get Signal from API (เวอร์ชัน Dynamic SL/TP)
 string GetSignalFromAPI(string data_json)
 {
@@ -281,28 +287,25 @@ string GetSignalFromAPI(string data_json)
         string signal = ExtractJsonString(json_response, "signal");
         double probability = ExtractJsonDouble(json_response, "probability");
         
-        // --- ⬇️ [เพิ่มใหม่] ⬇️ ---
-        // ดึงค่า SL/TP ที่ API คำนวณมาให้
-        double sl_price = ExtractJsonDouble(json_response, "sl_price");
-        double tp_price = ExtractJsonDouble(json_response, "tp_price");
-        // --- ⬆️ [เพิ่มใหม่] ⬆️ ---
+        // --- ⬇️ [แก้ไข] ⬇️ ---
+        // ดึงค่า ATR ที่ API ส่งมาให้
+        double atr_value = ExtractJsonDouble(json_response, "atr");
+        // --- ⬆️ [แก้ไข] ⬆️ ---
 
         Print("DEBUG: Parsed signal=", signal, " probability=", DoubleToString(probability,6),
-              " sl_price=", DoubleToString(sl_price, _Digits), " tp_price=", DoubleToString(tp_price, _Digits));
+              " atr=", DoubleToString(atr_value, 4));
         
         // update globals
         LastProbability = probability;
         LastSignal = signal;
-        LastSLPrice = sl_price; // ⬅️ เก็บค่า SL
-        LastTPPrice = tp_price; // ⬅️ เก็บค่า TP
+        LastATR = atr_value; // ⬅️ เก็บค่า ATR
         
         return LastSignal;
     }
     else
     {
         Print("Error getting signal: HTTP " + IntegerToString(res));
-        LastSLPrice = 0.0; // เคลียร์ค่าถ้า Error
-        LastTPPrice = 0.0;
+        LastATR = 0.0; // เคลียร์ค่าถ้า Error
         return "NONE";
     }
 }
@@ -377,8 +380,8 @@ void ExecuteTrade(string signal)
         Print("✅ Order Opened. Deal ticket: ", (string)result.deal, ". Now attempting (Step 2: Set Dynamic SL/TP)...");
         
         // --- ⬇️ [แก้ไข] ⬇️ ---
-        // ส่งค่า SL/TP ที่ได้จาก API (Global Variables) เข้าไปในฟังก์ชัน Modify
-        ModifyOrderSLTP(result.deal, signal, LastSLPrice, LastTPPrice); 
+        // ส่งค่า ATR ที่ได้จาก API (Global Variable) เข้าไปในฟังก์ชัน Modify
+        ModifyOrderSLTP(result.deal, signal, LastATR); 
         // --- ⬆️ [แก้ไข] ⬆️ ---
         
         string alert_msg = StringFormat("✅ %s Order Opened: Price %.5f, Lots %.2f", signal, request.price, volume);
@@ -430,15 +433,15 @@ void SendAccountStatusToAPI(string alert_message = "")
     }
 }
 
-// --- 🛑 [แทนที่ฟังก์ชันนี้] 🛑 ---
-// (F) Modify SL/TP [VERSION 3 - Dynamic Price]
-// 🛑 [แก้ไข] รับ sl_price และ tp_price เข้ามา
-void ModifyOrderSLTP(ulong deal_ticket, string signal, double sl_price, double tp_price)
+// --- 🛑 [แทนที่ฟังก์ชันนี้] (เวอร์ชันคำนวณ ATR) 🛑 ---
+// (F) Modify SL/TP [VERSION 4 - ATR Calculation]
+// 🛑 [แก้ไข] รับ atr_value (ไม่ใช่ sl_price)
+void ModifyOrderSLTP(ulong deal_ticket, string signal, double atr_value)
 {
-    // 1. ตรวจสอบว่าได้ราคามาจริง
-    if(sl_price == 0.0 || tp_price == 0.0)
+    // 1. ตรวจสอบว่าได้ค่า ATR มาจริง
+    if(atr_value <= 0.0)
     {
-        Print("❌ ModifyOrderSLTP Error: Invalid SL/TP prices received from API (0.0). Aborting modify.");
+        Print("❌ ModifyOrderSLTP Error: Invalid ATR value received from API (<= 0.0). Aborting modify.");
         return;
     }
 
@@ -468,23 +471,42 @@ void ModifyOrderSLTP(ulong deal_ticket, string signal, double sl_price, double t
     request_mod.symbol = _Symbol;
     
     // 6. 🛑 [แก้ไข] 🛑
-    // ไม่ต้องคำนวณ! ใช้ค่าที่ API ส่งมาให้เลย
+    // คำนวณ SL/TP โดยใช้ ATR และ ตัวคูณ (Multiplier) ที่เราตั้งค่า Input ไว้
+    
+    // แปลง ATR (ที่เป็น "ราคา") ให้เป็น "Points"
+    // (เช่น ATR 2.50 = 250 points ถ้า _Point = 0.01)
+    double sl_points_dynamic = (atr_value * SL_Multiplier);
+    double tp_points_dynamic = (atr_value * TP_Multiplier);
+
+    double sl_price = 0.0;
+    double tp_price = 0.0;
+
+    if (signal == "BUY")
+    {
+        sl_price = NormalizeDouble(open_price - sl_points_dynamic, _Digits);
+        tp_price = NormalizeDouble(open_price + tp_points_dynamic, _Digits);
+    }
+    else if (signal == "SELL")
+    {
+        sl_price = NormalizeDouble(open_price + sl_points_dynamic, _Digits);
+        tp_price = NormalizeDouble(open_price - tp_points_dynamic, _Digits);
+    }
+
     request_mod.sl = sl_price;
     request_mod.tp = tp_price;
-
-    // 7. 🛑 [แก้ไข] 🛑
-    // ปรับค่า SL/TP ที่ได้มา ให้ตรงตามกฎโบรกเกอร์ (สำคัญมาก)
+    
+    // 7. ปรับค่า SL/TP ให้ตรงตามกฎโบรกเกอร์ (เหมือนเดิม)
     if (signal == "BUY")
     {
         if (open_price - request_mod.sl < min_stop_price_dist)
         {
              request_mod.sl = NormalizeDouble(open_price - min_stop_price_dist, _Digits);
-             Print("DEBUG: Adjusted BUY SL (API) to meet min_stop: ", DoubleToString(request_mod.sl, _Digits));
+             Print("DEBUG: Adjusted BUY SL (ATR) to meet min_stop: ", DoubleToString(request_mod.sl, _Digits));
         }
         if (request_mod.tp - open_price < min_stop_price_dist)
         {
              request_mod.tp = NormalizeDouble(open_price + min_stop_price_dist, _Digits); 
-             Print("DEBUG: Adjusted BUY TP (API) to meet min_stop: ", DoubleToString(request_mod.tp, _Digits));
+             Print("DEBUG: Adjusted BUY TP (ATR) to meet min_stop: ", DoubleToString(request_mod.tp, _Digits));
         }
     }
     else if (signal == "SELL")
@@ -492,26 +514,26 @@ void ModifyOrderSLTP(ulong deal_ticket, string signal, double sl_price, double t
         if (request_mod.sl - open_price < min_stop_price_dist)
         {
              request_mod.sl = NormalizeDouble(open_price + min_stop_price_dist, _Digits);
-             Print("DEBUG: Adjusted SELL SL (API) to meet min_stop: ", DoubleToString(request_mod.sl, _Digits));
+             Print("DEBUG: Adjusted SELL SL (ATR) to meet min_stop: ", DoubleToString(request_mod.sl, _Digits));
         }
         if (open_price - request_mod.tp < min_stop_price_dist)
         {
              request_mod.tp = NormalizeDouble(open_price - min_stop_price_dist, _Digits);
-             Print("DEBUG: Adjusted SELL TP (API) to meet min_stop: ", DoubleToString(request_mod.tp, _Digits));
+             Print("DEBUG: Adjusted SELL TP (ATR) to meet min_stop: ", DoubleToString(request_mod.tp, _Digits));
         }
     }
 
     // 8. ส่งคำสั่ง Modify (เหมือนเดิม)
-    Print("DEBUG: Modifying position #", (string)position_ticket, " with [DYNAMIC] SL=", DoubleToString(request_mod.sl, _Digits), " TP=", DoubleToString(request_mod.tp, _Digits));
+    Print("DEBUG: Modifying position #", (string)position_ticket, " with [DYNAMIC ATR] SL=", DoubleToString(request_mod.sl, _Digits), " TP=", DoubleToString(request_mod.tp, _Digits));
     bool modified = OrderSend(request_mod, result_mod);
     
     if(modified && (result_mod.retcode == TRADE_RETCODE_DONE || result_mod.retcode == TRADE_RETCODE_PLACED))
     {
-        Print("✅ Dynamic SL/TP successfully set for position #", (string)position_ticket);
+        Print("✅ Dynamic (ATR) SL/TP successfully set for position #", (string)position_ticket);
     }
     else
     {
-        Print("❌ ModifyOrderSLTP failed (Dynamic): retcode=", result_mod.retcode, " comment=", result_mod.comment);
+        Print("❌ ModifyOrderSLTP failed (Dynamic ATR): retcode=", result_mod.retcode, " comment=", result_mod.comment);
     }
 }
 
