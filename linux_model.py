@@ -69,38 +69,39 @@ import talib
 #     return df
 
 # 🛑 A. ADD TECHNICAL INDICATORS (ตาม Obot_model) 🛑
+# 🛑 [แทนที่ฟังก์ชันนี้] ใน model.py (Windows) 🛑
+
 def add_technical_indicators(df_m5, df_m30, df_h1):
     """
-    เวอร์ชันอัปเกรด: เพิ่มฟีเจอร์จาก M5, M30, และ H1 (using TA-Lib only)
+    เวอร์ชันอัปเกรด: เพิ่มฟีเจอร์จาก M5, M30, H1 และ ATR (12 Features)
     """
     
-    # === ส่วนที่ 1: คำนวณฟีเจอร์ M5 (เหมือนเดิม) ===
+    # === ส่วนที่ 1: คำนวณฟีเจอร์ M5 ===
     df_m5 = df_m5.copy()
     close_prices_m5 = df_m5['close'].values.astype(np.float64)
+    high_prices_m5 = df_m5['high'].values.astype(np.float64) # ⬅️ เพิ่ม
+    low_prices_m5 = df_m5['low'].values.astype(np.float64)   # ⬅️ เพิ่ม
     
     df_m5['SMA_10'] = talib.SMA(close_prices_m5, timeperiod=10)
     df_m5['SMA_50'] = talib.SMA(close_prices_m5, timeperiod=50)
     df_m5['Momentum_1'] = talib.MOM(close_prices_m5, timeperiod=1)
     df_m5['High_Low'] = df_m5['high'] - df_m5['low']
+    
+    # --- ⬇️ 1. [เพิ่มใหม่] ⬇️ ---
+    # คำนวณ ATR (Average True Range) บน M5
+    df_m5['ATR_14'] = talib.ATR(high_prices_m5, low_prices_m5, close_prices_m5, timeperiod=14)
+    # --- ⬆️ [เพิ่มใหม่] ⬆️ ---
 
     # === ส่วนที่ 2: คำนวณฟีเจอร์ Multi-Timeframe (using TA-Lib) ===
-    
-    # 2.1: M30 RSI (RSI 14 บน Timeframe M30)
-    # 🆕 แก้ไข: ใช้ talib.RSI แทน pandas_ta
     close_prices_m30 = df_m30['close'].values.astype(np.float64)
     df_m30['M30_RSI'] = talib.RSI(close_prices_m30, timeperiod=14)
     
-    # 2.2: H1 MA Trend (MA 200 บน Timeframe H1)
-    # 🆕 แก้ไข: ใช้ talib.SMA แทน pandas_ta
     close_prices_h1 = df_h1['close'].values.astype(np.float64)
     df_h1['H1_MA_200'] = talib.SMA(close_prices_h1, timeperiod=200)
-    
-    # สร้างฟีเจอร์ Trend: 1 ถ้าอยู่เหนือเส้น, 0 ถ้าอยู่ใต้เส้น (เหมือนเดิม)
     df_h1['H1_MA_Trend'] = np.where(df_h1['close'] > df_h1['H1_MA_200'], 1, 0)
     
     # === ส่วนที่ 3: "การจัดเรียง" (Alignment) ===
-    # (ส่วนนี้เหมือนเดิม 100% เพราะใช้ pandas ที่คุณมีอยู่แล้ว)
-    
+    # (ส่วนนี้เหมือนเดิม 100%)
     print("Aligning M30 features to M5 timeline...")
     df_combined = pd.merge_asof(
         df_m5.sort_index(), 
@@ -109,7 +110,6 @@ def add_technical_indicators(df_m5, df_m30, df_h1):
         right_index=True, 
         direction='backward'
     )
-    
     print("Aligning H1 features to M5 timeline...")
     df_final = pd.merge_asof(
         df_combined.sort_index(),
@@ -119,15 +119,19 @@ def add_technical_indicators(df_m5, df_m30, df_h1):
         direction='backward'
     )
     
-    # === ส่วนที่ 4: สรุปผล (เหมือนเดิม 100%) ===
+    # === ส่วนที่ 4: สรุปผล ===
     df_final.dropna(inplace=True)
     df_final.reset_index(drop=True, inplace=True)
 
+    # --- ⬇️ 2. [แก้ไข] ⬇️ ---
+    # 🛑 เลือกฟีเจอร์ทั้งหมด (11 เดิม + 1 ใหม่ = 12 ฟีเจอร์)
     feature_cols = [
         'open', 'high', 'low', 'close', 'tick_volume', 
         'SMA_10', 'SMA_50', 'Momentum_1', 'High_Low',
-        'M30_RSI', 'H1_MA_Trend'  # <-- ฟีเจอร์ใหม่ 2 ตัว
+        'M30_RSI', 'H1_MA_Trend',
+        'ATR_14'  # <-- 🆕 ฟีเจอร์ใหม่
     ]
+    # --- ⬆️ [แก้ไข] ⬆️ ---
     
     final_cols = [col for col in feature_cols if col in df_final.columns]
     if len(final_cols) != len(feature_cols):

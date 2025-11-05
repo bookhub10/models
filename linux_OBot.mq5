@@ -11,13 +11,16 @@ input int    MagicNumber  = 12345;
 input double Lots         = 0.01;
 input double ProbThreshold = 0.50; // minimum probability to act on signal
 input int    MinTradeIntervalMins = 1; // minimum minutes between trades
-input int    StopLossPoints = 1500; // SL (Points)
-input int    TakeProfitPoints = 3000; // TP (Points)
+
 //--- Global Variables
-string BotStatus = "STOPPED"; // สถานะที่ควบคุมจาก API /command
+string BotStatus = "STOPPED"; 
 string LastSignal = "NONE";
 datetime LastSignalTime = 0;
 double LastProbability = 0.0;
+
+// --- ⬇️ เพิ่ม 2 บรรทัดนี้ ⬇️ ---
+double LastSLPrice = 0.0; // SL ที่ได้จาก API
+double LastTPPrice = 0.0; // TP ที่ได้จาก API
 
 //--- MQL5 JSON Utilities (Basic Implementation)
 // Function to safely extract a string value from a JSON response
@@ -251,7 +254,8 @@ string GetXAUUSDDataJSON(int m5_bars)
     return final_json;
 }
 
-// (C) Get Signal from API (แก้ไขการจัดการ post_data size)
+// --- 🛑 [แทนที่ฟังก์ชันนี้] 🛑 ---
+// (C) Get Signal from API (เวอร์ชัน Dynamic SL/TP)
 string GetSignalFromAPI(string data_json)
 {
     string predict_url = "/predict";
@@ -262,32 +266,43 @@ string GetSignalFromAPI(string data_json)
     string result_headers;
     int timeout = 10000;
     
-    // **1. แปลง String เป็น Char Array และเก็บขนาดข้อมูล**
     int data_size = StringToCharArray(data_json, post_data, 0, WHOLE_ARRAY);
-
-    // Copy into a trimmed body buffer of exact size to avoid trailing NULs
     ArrayResize(body, data_size);
     for (int i = 0; i < data_size; i++) body[i] = post_data[i];
 
     string full_url = APIServerURL + predict_url;
-    // 🛑 แก้ไข: เปลี่ยน WebRequest method จาก "GET" เป็น "POST"
     int res = WebRequest("POST", full_url, headers, timeout, body, result, result_headers); 
     
     if (res == 200) 
     {
         string json_response = CharArrayToString(result);
         Print("DEBUG: /predict HTTP 200 raw_response: ", json_response);
+        
         string signal = ExtractJsonString(json_response, "signal");
         double probability = ExtractJsonDouble(json_response, "probability");
-        Print("DEBUG: Parsed signal=", signal, " probability=", DoubleToString(probability,6));
-        // update globals used by decision logic
+        
+        // --- ⬇️ [เพิ่มใหม่] ⬇️ ---
+        // ดึงค่า SL/TP ที่ API คำนวณมาให้
+        double sl_price = ExtractJsonDouble(json_response, "sl_price");
+        double tp_price = ExtractJsonDouble(json_response, "tp_price");
+        // --- ⬆️ [เพิ่มใหม่] ⬆️ ---
+
+        Print("DEBUG: Parsed signal=", signal, " probability=", DoubleToString(probability,6),
+              " sl_price=", DoubleToString(sl_price, _Digits), " tp_price=", DoubleToString(tp_price, _Digits));
+        
+        // update globals
         LastProbability = probability;
         LastSignal = signal;
+        LastSLPrice = sl_price; // ⬅️ เก็บค่า SL
+        LastTPPrice = tp_price; // ⬅️ เก็บค่า TP
+        
         return LastSignal;
     }
     else
     {
         Print("Error getting signal: HTTP " + IntegerToString(res));
+        LastSLPrice = 0.0; // เคลียร์ค่าถ้า Error
+        LastTPPrice = 0.0;
         return "NONE";
     }
 }
@@ -296,9 +311,11 @@ string GetSignalFromAPI(string data_json)
 //+------------------------------------------------------------------+
 //| (D) Execute Trade - [VERSION 2-Step]                             |
 //+------------------------------------------------------------------+
+// --- 🛑 [แทนที่ฟังก์ชันนี้] 🛑 ---
 void ExecuteTrade(string signal)
 {
-    // --- (ส่วนตรวจสอบ Trading Allowed และ Volume Normalization เหมือนเดิม) ---
+    // ... (ส่วนตรวจสอบ Trading Allowed / Volume / Tick Data เหมือนเดิม) ...
+    // --- ⬇️ (โค้ดส่วนนี้เหมือนเดิม) ⬇️ ---
     if (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) == 0 || AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 0)
     {
         Print("❌ Trading not allowed by terminal or account settings. Skipping trade.");
@@ -309,12 +326,10 @@ void ExecuteTrade(string signal)
         Print("⚠️ Existing position detected for symbol ", _Symbol, " - skipping open inside ExecuteTrade.");
         return;
     }
-
     MqlTradeRequest request;
     MqlTradeResult  result;
     ZeroMemory(request);
     ZeroMemory(result);
-    
     double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
     double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
     double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
@@ -322,8 +337,6 @@ void ExecuteTrade(string signal)
     if (lotStep > 0) volume = MathFloor(volume / lotStep) * lotStep;
     volume = MathMax(minLot, MathMin(maxLot, volume));
     if (volume < minLot) { Print("❌ Computed volume below minimum. min=", minLot, " computed=", volume); return; }
-    
-    // --- 2. Trade Request Setup ---
     request.action    = TRADE_ACTION_DEAL;
     request.symbol    = _Symbol;
     request.volume    = volume;
@@ -331,23 +344,12 @@ void ExecuteTrade(string signal)
     request.magic     = MagicNumber;
     request.type_filling = ORDER_FILLING_IOC; 
     request.type_time    = ORDER_TIME_GTC;
-    
-    // 🛑 [NEW LOGIC] ส่งออเดอร์โดยที่ SL/TP เป็น 0 ก่อน
-    request.sl = 0.0;
+    request.sl = 0.0; // ⬅️ ส่ง 0.0 ไปก่อน (เหมือนเดิม)
     request.tp = 0.0;
-    
     MqlTick tick;
-    if(!SymbolInfoTick(_Symbol, tick))
-    {
-        Print("❌ Failed to get tick");
-        return;
-    }
-   
-    if (TimeCurrent() - tick.time > 10)
-    {
-        Print("⚠️ Tick data is stale: ", TimeToString(tick.time, TIME_DATE|TIME_SECONDS));
-        return;
-    }
+    if(!SymbolInfoTick(_Symbol, tick)) { Print("❌ Failed to get tick"); return; }
+    if (TimeCurrent() - tick.time > 10) { Print("⚠️ Tick data is stale"); return; }
+    // --- ⬆️ (โค้ดส่วนนี้เหมือนเดิม) ⬆️ ---
 
     // --- 3. BUY/SELL Logic (ตั้งค่า Price เท่านั้น) ---
     if (signal == "BUY")
@@ -362,39 +364,29 @@ void ExecuteTrade(string signal)
         request.comment = "RNN_BOT_SELL";
         request.price = tick.bid;
     }
-    else
-    {
-        Print("DEBUG: ExecuteTrade received unhandled signal: ", signal);
-        return;
-    }
+    else { return; }
 
-    // --- 4. Final Diagnostics and Order Send ---
+    // --- 4. Order Send (Step 1) ---
     Print("INFO: Attempting OrderSend (Step 1: Market Order) for ", signal);
-    
     bool sent = OrderSend(request, result);
-
-    Print("DEBUG: OrderSend (Market) returned sent=", sent,
-          " retcode=", result.retcode,
-          " comment=", result.comment,
-          " deal=", result.deal,
-          " order=", result.order);
+    Print("DEBUG: OrderSend (Market) returned sent=", sent, " retcode=", result.retcode, " deal=", result.deal);
           
-    // --- 5. 🛑 [NEW LOGIC] Modify SL/TP AFTER order is open ---
+    // --- 5. 🛑 [แก้ไข] 🛑 Modify SL/TP AFTER order is open ---
     if (sent && (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED))
     {
-        Print("✅ Order Opened. Deal ticket: ", (string)result.deal, ". Now attempting (Step 2: Set SL/TP)...");
+        Print("✅ Order Opened. Deal ticket: ", (string)result.deal, ". Now attempting (Step 2: Set Dynamic SL/TP)...");
         
-        // เรียกฟังก์ชันใหม่เพื่อตั้งค่า SL/TP โดยใช้ Deal Ticket
-        ModifyOrderSLTP(result.deal, signal); 
+        // --- ⬇️ [แก้ไข] ⬇️ ---
+        // ส่งค่า SL/TP ที่ได้จาก API (Global Variables) เข้าไปในฟังก์ชัน Modify
+        ModifyOrderSLTP(result.deal, signal, LastSLPrice, LastTPPrice); 
+        // --- ⬆️ [แก้ไข] ⬆️ ---
         
-        // Send alert and update time (เหมือนเดิม)
         string alert_msg = StringFormat("✅ %s Order Opened: Price %.5f, Lots %.2f", signal, request.price, volume);
         SendTradeAlert(alert_msg);
         LastSignalTime = TimeCurrent(); 
     }
     else
     {
-        // ถ้า Step 1 ล้มเหลว
         Print("❌ ", signal, " failed (Step 1): retcode=", result.retcode, " result_comment=", result.comment);
     }
 }
@@ -438,88 +430,88 @@ void SendAccountStatusToAPI(string alert_message = "")
     }
 }
 
-//+------------------------------------------------------------------+
-//| (F) Modify SL/TP for an open position [VERSION 2 - FIXED]        |
-//+------------------------------------------------------------------+
-void ModifyOrderSLTP(ulong deal_ticket, string signal)
+// --- 🛑 [แทนที่ฟังก์ชันนี้] 🛑 ---
+// (F) Modify SL/TP [VERSION 3 - Dynamic Price]
+// 🛑 [แก้ไข] รับ sl_price และ tp_price เข้ามา
+void ModifyOrderSLTP(ulong deal_ticket, string signal, double sl_price, double tp_price)
 {
-    // 1. 🛑 [FIXED] แก้ไข: เลือก Position ด้วย Symbol (ไม่ใช่ Deal Ticket)
-    // เพราะเรารู้ว่าเพิ่งเปิดไป และมีแค่ Position เดียว
+    // 1. ตรวจสอบว่าได้ราคามาจริง
+    if(sl_price == 0.0 || tp_price == 0.0)
+    {
+        Print("❌ ModifyOrderSLTP Error: Invalid SL/TP prices received from API (0.0). Aborting modify.");
+        return;
+    }
+
+    // 2. เลือก Position (เหมือนเดิม)
     if (!PositionSelect(_Symbol))
     {
         Print("❌ ModifyOrderSLTP Error: Could not select position by _Symbol after opening deal ", (string)deal_ticket);
         return;
     }
     
-    // 2. ดึงข้อมูล Position ที่เปิดอยู่
+    // 3. ดึงข้อมูล Position (เหมือนเดิม)
     double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-    ulong position_ticket = PositionGetInteger(POSITION_TICKET); // ⬅️ นี่คือ Ticket ของ Position จริงๆ
+    ulong position_ticket = PositionGetInteger(POSITION_TICKET); 
     
-    // 3. ดึงค่า StopLevel
+    // 4. ดึงค่า StopLevel (เหมือนเดิม)
     int min_stop_points = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
     if (min_stop_points <= 0) min_stop_points = 1; 
     double min_stop_price_dist = MathMax(min_stop_points * _Point, 10 * _Point);
     
-    // 4. เตรียมคำสั่ง Modify
+    // 5. เตรียมคำสั่ง Modify (เหมือนเดิม)
     MqlTradeRequest request_mod;
     MqlTradeResult  result_mod;
     ZeroMemory(request_mod);
     ZeroMemory(result_mod);
-    
-    request_mod.action = TRADE_ACTION_SLTP; // ⬅️ Action คือการแก้ไข SL/TP
-    request_mod.position = position_ticket; // ⬅️ ระบุ Position Ticket ที่จะแก้ไข
+    request_mod.action = TRADE_ACTION_SLTP;
+    request_mod.position = position_ticket;
     request_mod.symbol = _Symbol;
     
-    double sl_price = 0.0;
-    double tp_price = 0.0;
+    // 6. 🛑 [แก้ไข] 🛑
+    // ไม่ต้องคำนวณ! ใช้ค่าที่ API ส่งมาให้เลย
+    request_mod.sl = sl_price;
+    request_mod.tp = tp_price;
 
-    // 5. คำนวณ SL/TP (ใช้ Input ที่เราตั้งไว้)
+    // 7. 🛑 [แก้ไข] 🛑
+    // ปรับค่า SL/TP ที่ได้มา ให้ตรงตามกฎโบรกเกอร์ (สำคัญมาก)
     if (signal == "BUY")
     {
-        sl_price = NormalizeDouble(open_price - (StopLossPoints * _Point), _Digits);
-        tp_price = NormalizeDouble(open_price + (TakeProfitPoints * _Point), _Digits);
-        
-        // Adjust SL/TP
-        if (open_price - sl_price < min_stop_price_dist)
+        if (open_price - request_mod.sl < min_stop_price_dist)
         {
-             sl_price = NormalizeDouble(open_price - min_stop_price_dist, _Digits);
+             request_mod.sl = NormalizeDouble(open_price - min_stop_price_dist, _Digits);
+             Print("DEBUG: Adjusted BUY SL (API) to meet min_stop: ", DoubleToString(request_mod.sl, _Digits));
         }
-        if (tp_price - open_price < min_stop_price_dist)
+        if (request_mod.tp - open_price < min_stop_price_dist)
         {
-             tp_price = NormalizeDouble(open_price + min_stop_price_dist * 2, _Digits); 
+             request_mod.tp = NormalizeDouble(open_price + min_stop_price_dist, _Digits); 
+             Print("DEBUG: Adjusted BUY TP (API) to meet min_stop: ", DoubleToString(request_mod.tp, _Digits));
         }
     }
     else if (signal == "SELL")
     {
-        sl_price = NormalizeDouble(open_price + (StopLossPoints * _Point), _Digits);
-        tp_price = NormalizeDouble(open_price - (TakeProfitPoints * _Point), _Digits);
-        
-        // Adjust SL/TP
-        if (sl_price - open_price < min_stop_price_dist)
+        if (request_mod.sl - open_price < min_stop_price_dist)
         {
-             sl_price = NormalizeDouble(open_price + min_stop_price_dist, _Digits);
+             request_mod.sl = NormalizeDouble(open_price + min_stop_price_dist, _Digits);
+             Print("DEBUG: Adjusted SELL SL (API) to meet min_stop: ", DoubleToString(request_mod.sl, _Digits));
         }
-        if (open_price - tp_price < min_stop_price_dist)
+        if (open_price - request_mod.tp < min_stop_price_dist)
         {
-             tp_price = NormalizeDouble(open_price - min_stop_price_dist * 2, _Digits);
+             request_mod.tp = NormalizeDouble(open_price - min_stop_price_dist, _Digits);
+             Print("DEBUG: Adjusted SELL TP (API) to meet min_stop: ", DoubleToString(request_mod.tp, _Digits));
         }
     }
-    
-    request_mod.sl = sl_price;
-    request_mod.tp = tp_price;
-    
-    // 6. ส่งคำสั่ง Modify
-    Print("DEBUG: Modifying position #", (string)position_ticket, " with SL=", DoubleToString(sl_price, _Digits), " TP=", DoubleToString(tp_price, _Digits));
+
+    // 8. ส่งคำสั่ง Modify (เหมือนเดิม)
+    Print("DEBUG: Modifying position #", (string)position_ticket, " with [DYNAMIC] SL=", DoubleToString(request_mod.sl, _Digits), " TP=", DoubleToString(request_mod.tp, _Digits));
     bool modified = OrderSend(request_mod, result_mod);
     
     if(modified && (result_mod.retcode == TRADE_RETCODE_DONE || result_mod.retcode == TRADE_RETCODE_PLACED))
     {
-        Print("✅ SL/TP successfully set for position #", (string)position_ticket);
+        Print("✅ Dynamic SL/TP successfully set for position #", (string)position_ticket);
     }
     else
     {
-        // 🛑 ถ้าล้มเหลว มันจะพิมพ์ Error ที่นี่ 🛑
-        Print("❌ ModifyOrderSLTP failed (Step 2): retcode=", result_mod.retcode, " comment=", result_mod.comment);
+        Print("❌ ModifyOrderSLTP failed (Dynamic): retcode=", result_mod.retcode, " comment=", result_mod.comment);
     }
 }
 

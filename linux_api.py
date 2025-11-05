@@ -44,15 +44,21 @@ class Config:
     BUY_THRESHOLD = 0.50 
     SELL_THRESHOLD = 0.50 
 
+    # --- ⬇️ เพิ่ม 2 บรรทัดนี้ ⬇️ ---
+    # (คุณสามารถปรับค่าเหล่านี้ได้ในอนาคต)
+    SL_MULTIPLIER = 2.0  # SL = 2 * ATR
+    TP_MULTIPLIER = 3.0  # TP = 3 * ATR
+
 app = Flask(__name__)
 rnn_model = None
 scaler = None
 
-# 🛑 รายชื่อคุณลักษณะ (9 Features)
+# 🛑 รายชื่อคุณลักษณะ (12 Features)
 REQUIRED_FEATURES = [
     'open', 'high', 'low', 'close', 'tick_volume', 
     'SMA_10', 'SMA_50', 'Momentum_1', 'High_Low',
-    'M30_RSI', 'H1_MA_Trend'
+    'M30_RSI', 'H1_MA_Trend',
+    'ATR_14'  # <-- 🆕 เพิ่มฟีเจอร์ที่ 12
 ]
 
 account_status = {
@@ -180,82 +186,92 @@ def parse_mql_json(req):
 
 # --- Core Prediction Logic ---
 
-# --- Core Prediction Logic (เวอร์ชัน Multi-Timeframe) ---
+# --- 🛑 [แทนที่ฟังก์ชันนี้] Core Prediction Logic (เวอร์ชัน Dynamic SL/TP) 🛑 ---
 
 def preprocess_and_predict(raw_data):
-    """Processes 3 TFs, runs prediction, and returns signal/probability."""
+    """
+    Processes 3 TFs, runs prediction, and returns signal, prob, AND dynamic SL/TP.
+    """
     global rnn_model, scaler
-
-    # 1. 🆕 แปลง JSON 3 ส่วน ให้เป็น DataFrames
+    
+    # 1. แปลง JSON (เหมือนเดิม)
     try:
         df_m5 = pd.DataFrame(raw_data['m5_data'])
         df_m30 = pd.DataFrame(raw_data['m30_data'])
         df_h1 = pd.DataFrame(raw_data['h1_data'])
-
-        # ตั้งค่า Index (สำคัญมากสำหรับการ merge)
+        # (โค้ดแปลง time index เหมือนเดิม)
         df_m5['time'] = pd.to_datetime(df_m5['time'], unit='s')
         df_m5.set_index('time', inplace=True)
-
         df_m30['time'] = pd.to_datetime(df_m30['time'], unit='s')
         df_m30.set_index('time', inplace=True)
-        # เราต้องการแค่ close จาก M30
         df_m30 = df_m30[['close']] 
-
         df_h1['time'] = pd.to_datetime(df_h1['time'], unit='s')
         df_h1.set_index('time', inplace=True)
-        # เราต้องการแค่ close จาก H1
         df_h1 = df_h1[['close']] 
-
     except Exception as e:
         raise ValueError(f"Failed to parse Multi-Timeframe data. Error: {e}")
 
-    # 2. 🆕 เรียกใช้ฟังก์ชัน add_technical_indicators เวอร์ชันใหม่
-    # (ฟังก์ชันนี้ import มาจาก linux_model.py ที่เราเพิ่งอัปเกรด)
+    # 2. เรียกใช้ฟังก์ชัน 12-feature (จาก linux_model.py)
     df_features = add_technical_indicators(df_m5, df_m30, df_h1)
-
+    
     # 3. ตรวจสอบความยาว (เหมือนเดิม)
     if len(df_features) < Config.SEQUENCE_LENGTH:
         raise ValueError(f"Not enough valid bars after merging TFs ({len(df_features)} bars), expected at least {Config.SEQUENCE_LENGTH}.")
 
-    # 4. เตรียม Sequence สำหรับ Scaling (เหมือนเดิม)
+    # 4. 🛑 [สำคัญ] ดึงค่าล่าสุด (ก่อน Scale) มาคำนวณ SL/TP
+    # เราใช้ .iloc[-1] เพื่อเอาค่า "ล่าสุด"
+    latest_atr = df_features['ATR_14'].iloc[-1]
+    latest_close = df_features['close'].iloc[-1] # ใช้ close ในการอ้างอิงคร่าวๆ
+
+    # 5. เตรียม Sequence สำหรับ Scaling (เหมือนเดิม)
     df_for_scaling = df_features.iloc[-Config.SEQUENCE_LENGTH:].copy() 
-
-    # 5. 🛑 เลือก 11 ฟีเจอร์ (เหมือนเดิม แต่ตอนนี้ใช้ List ใหม่)
+    
+    # 6. เลือก 12 ฟีเจอร์ (ใช้ List ใหม่)
     final_features = [col for col in REQUIRED_FEATURES if col in df_for_scaling.columns]
-
     if len(final_features) != len(REQUIRED_FEATURES):
         missing = set(REQUIRED_FEATURES) - set(final_features)
         raise ValueError(f"Feature Mismatch: Expected {len(REQUIRED_FEATURES)} features. Missing: {missing}")
-
     df_for_scaling_trimmed = df_for_scaling[final_features]
-
+    
+    # 7. Scaling (เหมือนเดิม)
     try:
-        # 6. Scaling (เหมือนเดิม)
         _, test_scaled, _ = scale_features(
-            df_for_scaling_trimmed,
-            test_df=None,
-            scaler=scaler
+            df_for_scaling_trimmed, test_df=None, scaler=scaler
         )
     except Exception as e:
         raise ValueError(f"Scaling failed (check feature count: {len(final_features)}). Error: {e}")
 
-    # 7. Prepare Sequence (เหมือนเดิม)
+    # 8. Prepare Sequence (เหมือนเดิม)
     X_pred_data = test_scaled.values 
     X_pred = np.array([X_pred_data]) 
 
-    # 8. Predict (เหมือนเดิม)
+    # 9. Predict (เหมือนเดิม)
     prediction = rnn_model.predict(X_pred, verbose=0)[0][0]
-
-    # 9. Determine Signal (เหมือนเดิม)
+    
+    # 10. Determine Signal (เหมือนเดิม)
     signal = 'NONE'
     if prediction >= Config.BUY_THRESHOLD:
         signal = 'BUY'
     elif (1 - prediction) >= Config.SELL_THRESHOLD:
         signal = 'SELL'
-
+    
     account_status['last_signal'] = signal
+    
+    # 11. 🛑 [ใหม่] คำนวณ Dynamic SL/TP
+    sl_price = 0.0
+    tp_price = 0.0
+    atr_offset = latest_atr * Config.SL_MULTIPLIER # SL = 2 * ATR
+    tp_offset = latest_atr * Config.TP_MULTIPLIER # TP = 3 * ATR
 
-    return signal, prediction
+    if signal == 'BUY':
+        sl_price = latest_close - atr_offset
+        tp_price = latest_close + tp_offset
+    elif signal == 'SELL':
+        sl_price = latest_close + atr_offset
+        tp_price = latest_close - tp_offset
+        
+    # คืนค่า 4 อย่าง (แทนที่จะเป็น 2)
+    return signal, prediction, sl_price, tp_price
 
 # --- API Endpoints ---
 
@@ -273,6 +289,7 @@ def get_status():
         print(f"❌ Error fetching status: {e}")
         return jsonify({'bot_status': 'ERROR', 'message': f'Server internal error: {str(e)}'}), 500
 
+# --- 🛑 [แทนที่ Endpoint นี้] 🛑 ---
 @app.route('/predict', methods=['POST']) 
 def predict_signal():
     if rnn_model is None or scaler is None:
@@ -282,25 +299,26 @@ def predict_signal():
         return jsonify({'signal': 'NONE', 'probability': 0.0, 'message': f"Bot is {account_status['bot_status']}."}), 200
 
     try:
-        # ใช้ Helper Function เพื่อ parse JSON จาก MQL5
         data = parse_mql_json(request)
         if data is None:
             return jsonify({'signal': 'ERROR', 'probability': 0.0, 'message': 'Invalid JSON data received.'}), 400
         
-        signal, probability = preprocess_and_predict(data)
+        # 🛑 [แก้ไข] รับ 4 ค่าที่คืนมา
+        signal, probability, sl_price, tp_price = preprocess_and_predict(data)
         
+        # 🛑 [แก้ไข] ส่ง JSON รูปแบบใหม่
         return jsonify({
             'signal': signal,
             'probability': float(probability),
+            'sl_price': float(sl_price), # ⬅️ ส่ง SL Price
+            'tp_price': float(tp_price), # ⬅️ ส่ง TP Price
             'message': 'Prediction successful.'
         }), 200
         
     except ValueError as ve:
-        # Validation Errors (e.g., Not enough bars, Scaling failure)
         print(f"❌ Prediction validation error: {ve}")
         return jsonify({'signal': 'ERROR', 'probability': 0.0, 'message': str(ve)}), 400
     except Exception as e:
-        # Other Internal Errors
         print(f"❌ CRITICAL ERROR in /predict: {e}")
         traceback.print_exc()
         return jsonify({'signal': 'ERROR', 'probability': 0.0, 'message': 'Internal Server Error.'}), 500
