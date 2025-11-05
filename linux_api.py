@@ -41,19 +41,25 @@ class Config:
     MODEL_PATH = 'models/gru_bot_best_M5.h5' 
     SCALER_PATH = 'models/scaler.pkl'
     SEQUENCE_LENGTH = 100
-    BUY_THRESHOLD = 0.50 
-    SELL_THRESHOLD = 0.50 
+    
+    # --- ⬇️ [เพิ่มใหม่] ⬇️ ---
+    # เกณฑ์ขั้นต่ำที่ "มั่นใจ" ถึงจะยอมเทรด
+    # (ถ้าโมเดลมั่นใจแค่ 40% (0.4) เราจะบังคับให้เป็น HOLD)
+    PREDICTION_THRESHOLD = 0.4 # ⬅️ คุณจูนค่านี้ได้ (เช่น 0.45 หรือ 0.55)
 
 app = Flask(__name__)
 rnn_model = None
 scaler = None
 
-# 🛑 รายชื่อคุณลักษณะ (12 Features)
+# 🛑 รายชื่อคุณลักษณะ (15 Features)
 REQUIRED_FEATURES = [
     'open', 'high', 'low', 'close', 'tick_volume', 
     'SMA_10', 'SMA_50', 'Momentum_1', 'High_Low',
     'M30_RSI', 'H1_MA_Trend',
-    'ATR_14'  # <-- 🆕 เพิ่มฟีเจอร์ที่ 12
+    'ATR_14',
+    'RSI_Overbought', # ⬅️ เพิ่ม
+    'RSI_Oversold',   # ⬅️ เพิ่ม
+    'SMA_Cross'       # ⬅️ เพิ่ม
 ]
 
 account_status = {
@@ -181,10 +187,10 @@ def parse_mql_json(req):
 
 # --- Core Prediction Logic ---
 
-# --- 🛑 [แทนที่ฟังก์ชันนี้] (เวอร์ชันส่ง ATR) 🛑 ---
+# --- 🛑 [แทนที่ฟังก์ชันนี้] (เวอร์ชัน 3-Class) 🛑 ---
 def preprocess_and_predict(raw_data):
     """
-    Processes 12 features, runs prediction, and returns signal, prob, AND latest_atr.
+    Processes 15 features, runs 3-CLASS prediction, and returns signal/prob/atr.
     """
     global rnn_model, scaler
     
@@ -193,6 +199,7 @@ def preprocess_and_predict(raw_data):
         df_m5 = pd.DataFrame(raw_data['m5_data'])
         df_m30 = pd.DataFrame(raw_data['m30_data'])
         df_h1 = pd.DataFrame(raw_data['h1_data'])
+        # (โค้ดแปลง time index เหมือนเดิม)
         df_m5['time'] = pd.to_datetime(df_m5['time'], unit='s')
         df_m5.set_index('time', inplace=True)
         df_m30['time'] = pd.to_datetime(df_m30['time'], unit='s')
@@ -204,20 +211,20 @@ def preprocess_and_predict(raw_data):
     except Exception as e:
         raise ValueError(f"Failed to parse Multi-Timeframe data. Error: {e}")
 
-    # 2. เรียกใช้ฟังก์ชัน 12-feature (จาก linux_model.py)
+    # 2. เรียกใช้ฟังก์ชัน 15-feature (จาก linux_model.py)
     df_features = add_technical_indicators(df_m5, df_m30, df_h1)
     
     # 3. ตรวจสอบความยาว (เหมือนเดิม)
     if len(df_features) < Config.SEQUENCE_LENGTH:
         raise ValueError(f"Not enough valid bars after merging TFs ({len(df_features)} bars), expected at least {Config.SEQUENCE_LENGTH}.")
 
-    # 4. 🛑 [แก้ไข] ดึงค่า ATR ล่าสุด
+    # 4. ดึงค่า ATR ล่าสุด (เหมือนเดิม)
     latest_atr = df_features['ATR_14'].iloc[-1]
 
     # 5. เตรียม Sequence สำหรับ Scaling (เหมือนเดิม)
     df_for_scaling = df_features.iloc[-Config.SEQUENCE_LENGTH:].copy() 
     
-    # 6. เลือก 12 ฟีเจอร์ (เหมือนเดิม)
+    # 6. เลือก 15 ฟีเจอร์ (ใช้ List ใหม่)
     df_for_scaling_trimmed = df_for_scaling[REQUIRED_FEATURES]
     
     # 7. Scaling (เหมือนเดิม)
@@ -231,19 +238,32 @@ def preprocess_and_predict(raw_data):
     # 8. Prepare Sequence & Predict (เหมือนเดิม)
     X_pred_data = test_scaled.values 
     X_pred = np.array([X_pred_data]) 
-    prediction = rnn_model.predict(X_pred, verbose=0)[0][0]
     
-    # 10. Determine Signal (เหมือนเดิม)
-    signal = 'NONE'
-    if prediction >= Config.BUY_THRESHOLD:
+    # 9. 🛑 [แก้ไข] 🛑 Predict แบบ 3-Class
+    # prediction จะหน้าตาแบบนี้: [[0.7 (HOLD), 0.2 (BUY), 0.1 (SELL)]]
+    prediction_array = rnn_model.predict(X_pred, verbose=0)[0]
+    
+    # 10. 🛑 [แก้ไข] 🛑 Determine Signal (หา Class ที่ชนะ)
+    
+    # ดึง Class ที่มี % ชนะสูงสุด (0, 1, หรือ 2)
+    predicted_class = np.argmax(prediction_array) 
+    
+    # ดึง % ความน่าจะเป็นของ Class ที่ชนะ
+    probability = np.max(prediction_array) 
+    
+    signal = 'NONE' # ค่าเริ่มต้น
+    if predicted_class == 1: # 1 = BUY
         signal = 'BUY'
-    elif (1 - prediction) >= Config.SELL_THRESHOLD:
+    elif predicted_class == 2: # 2 = SELL
         signal = 'SELL'
+    elif predicted_class == 0: # 0 = HOLD
+        signal = 'HOLD' # ⬅️ สัญญาณใหม่
     
     account_status['last_signal'] = signal
         
-    # 11. 🛑 [แก้ไข] คืนค่า ATR (แทน sl_price)
-    return signal, prediction, latest_atr
+    # 11. คืนค่า ATR (เหมือนเดิม)
+    # (เราจะส่ง ATR เสมอ เผื่อไว้)
+    return signal, probability, latest_atr
 
 # --- API Endpoints ---
 
@@ -261,7 +281,7 @@ def get_status():
         print(f"❌ Error fetching status: {e}")
         return jsonify({'bot_status': 'ERROR', 'message': f'Server internal error: {str(e)}'}), 500
 
-# --- 🛑 [แทนที่ Endpoint นี้] 🛑 ---
+# --- 🛑 [แทนที่ Endpoint นี้] (เวอร์ชัน 3-Class) 🛑 ---
 @app.route('/predict', methods=['POST']) 
 def predict_signal():
     if rnn_model is None or scaler is None:
@@ -274,14 +294,20 @@ def predict_signal():
         if data is None:
             return jsonify({'signal': 'ERROR', 'probability': 0.0, 'message': 'Invalid JSON data received.'}), 400
         
-        # 🛑 [แก้ไข] รับ 3 ค่าที่คืนมา (atr)
         signal, probability, atr = preprocess_and_predict(data)
         
-        # 🛑 [แก้ไข] ส่ง JSON รูปแบบใหม่ (atr)
+        # --- ⬇️ [เพิ่มใหม่] ⬇️ ---
+        # 🛑 "ตัวกรองความมั่นใจ" 🛑
+        # ถ้าความมั่นใจ (probability) ต่ำกว่าเกณฑ์ (0.50)...
+        if probability < Config.PREDICTION_THRESHOLD:
+            # บังคับให้เป็น HOLD (แม้ว่าโมเดลจะบอก BUY/SELL)
+            signal = 'HOLD' 
+        # --- ⬆️ [เพิ่มใหม่] ⬆️ ---
+        
         return jsonify({
-            'signal': signal,
+            'signal': signal, # ⬅️ ตอนนี้สามารถเป็น "HOLD" ได้แล้ว
             'probability': float(probability),
-            'atr': float(atr), # ⬅️ ส่ง ATR
+            'atr': float(atr),
             'message': 'Prediction successful.'
         }), 200
         

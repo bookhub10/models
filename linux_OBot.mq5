@@ -122,41 +122,38 @@ void OnTick()
             // 4. ส่งข้อมูลไปยัง Flask API และรับสัญญาณ
             string signal = GetSignalFromAPI(data_json);
 
-            // 5. Logic การตัดสินใจ (เหมือนเดิม)
+            // --- ⬇️ [แก้ไข] ⬇️ ---
+            
+            // 5. Logic การตัดสินใจ (เวอร์ชัน 3-Class)
+            
             if (signal == "BUY" || signal == "SELL") 
             {
+                // (ถ้าสัญญาณคือ BUY หรือ SELL ให้ทำงานเหมือนเดิม)
                 int totalPositions = PositionsTotal();
                 bool hasPosition = PositionSelect(_Symbol);
                 datetime now = TimeCurrent();
                 int secondsSinceLast = (int)(now - LastSignalTime);
 
                 Print("DEBUG: Trade decision check for ", signal, ": LastProbability=", DoubleToString(LastProbability,6),
-                      " ProbThreshold=", DoubleToString(ProbThreshold,2),
+                      " ProbThreshold=", DoubleToString(ProbThreshold,2), // ⬅️ ProbThreshold นี้คือ 0.50 (จาก API)
                       " SecondsSinceLast=", IntegerToString(secondsSinceLast),
                       " PositionsTotal=", IntegerToString(totalPositions));
 
                 if (!hasPosition)
                 {
-                    // 1. ตรวจสอบ Probability ของ BUY
-                    if (signal == "BUY" && LastProbability < ProbThreshold)
-                    {
-                        Print("DEBUG: Skipping BUY - probability (", DoubleToString(LastProbability,6), ") < threshold (", DoubleToString(ProbThreshold,2), ").");
-                    }
-                    // 2. ตรวจสอบ Probability ของ SELL
-                    else if (signal == "SELL" && (1.0 - LastProbability) < ProbThreshold)
-                    {
-                        double sell_prob = 1.0 - LastProbability;
-                        Print("DEBUG: Skipping SELL - probability (", DoubleToString(sell_prob,6), ") < threshold (", DoubleToString(ProbThreshold,2), ").");
-                    }
-                    // 3. ตรวจสอบ MinTradeInterval
-                    else if (secondsSinceLast < MinTradeIntervalMins * 60)
+                    // 🛑 [หมายเหตุ] 🛑
+                    // API ได้กรอง ProbThreshold (0.50) มาให้เราแล้ว
+                    // เราไม่จำเป็นต้องเช็ก LastProbability < ProbThreshold อีก
+                    
+                    // 1. ตรวจสอบ MinTradeInterval
+                    if (secondsSinceLast < MinTradeIntervalMins * 60)
                     {
                         Print("DEBUG: Skipping ", signal, " - within MinTradeInterval (", IntegerToString(secondsSinceLast), "s).");
                     }
-                    // 4. ถ้าผ่านหมด ให้เทรด
+                    // 2. ถ้าผ่านหมด ให้เทรด
                     else
                     {
-                        Print("DEBUG: Conditions met - attempting ExecuteTrade(\"", signal, "\").");
+                        Print("DEBUG: Conditions met (Prob > Threshold, Interval OK) - attempting ExecuteTrade(\"", signal, "\").");
                         ExecuteTrade(signal); // ⬅️ เรียกใช้ ExecuteTrade (Dynamic Lot)
                     }
                 }
@@ -165,6 +162,13 @@ void OnTick()
                     Print("DEBUG: Received ", signal, " but existing position detected - skipping open.");
                 }
             }
+            else if (signal == "HOLD")
+            {
+                // 🆕 [เพิ่มใหม่]
+                // ถ้า API บอกให้ "HOLD"
+                Print("DEBUG: Signal is HOLD (Prob: ", DoubleToString(LastProbability,4), "). No action taken.");
+            }
+            // --- ⬆️ [แก้ไข] ⬆️ ---
         }
         
         // 6. อัปเดตสถานะบัญชี (เหมือนเดิม)

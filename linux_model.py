@@ -118,18 +118,28 @@ def add_technical_indicators(df_m5, df_m30, df_h1):
         right_index=True,
         direction='backward'
     )
+
+    # Feature 13 & 14: RSI Zones (ใช้ M30_RSI ที่ merge แล้ว)
+    df_final['RSI_Overbought'] = np.where(df_final['M30_RSI'] > 70, 1, 0)
+    df_final['RSI_Oversold'] = np.where(df_final['M30_RSI'] < 30, 1, 0)
+    
+    # Feature 15: SMA Crossover (ใช้ SMA_10 และ SMA_50 ที่ merge แล้ว)
+    df_final['SMA_Cross'] = np.where(df_final['SMA_10'] > df_final['SMA_50'], 1, 0)
     
     # === ส่วนที่ 4: สรุปผล ===
     df_final.dropna(inplace=True)
     df_final.reset_index(drop=True, inplace=True)
 
-    # --- ⬇️ 2. [แก้ไข] ⬇️ ---
-    # 🛑 เลือกฟีเจอร์ทั้งหมด (11 เดิม + 1 ใหม่ = 12 ฟีเจอร์)
+    # --- ⬇️ 3. [แก้ไข] ⬇️ ---
+    # 🛑 เลือกฟีเจอร์ทั้งหมด (12 เดิม + 3 ใหม่ = 15 ฟีเจอร์)
     feature_cols = [
         'open', 'high', 'low', 'close', 'tick_volume', 
         'SMA_10', 'SMA_50', 'Momentum_1', 'High_Low',
         'M30_RSI', 'H1_MA_Trend',
-        'ATR_14'  # <-- 🆕 ฟีเจอร์ใหม่
+        'ATR_14',
+        'RSI_Overbought', # ⬅️ เพิ่ม
+        'RSI_Oversold',   # ⬅️ เพิ่ม
+        'SMA_Cross'       # ⬅️ เพิ่ม
     ]
     # --- ⬆️ [แก้ไข] ⬆️ ---
     
@@ -143,33 +153,47 @@ def add_technical_indicators(df_m5, df_m30, df_h1):
     return df_final
 
 # 🛑 B. CREATE SEQUENCES AND LABELS (ปรับให้สอดคล้องกับการเทรด) 🛑
-def create_sequences_and_labels(df, sequence_length=100, lookahead_bars=1):
+# --- 🛑 [แทนที่ฟังก์ชันนี้] (เวอร์ชัน 3-Class Fix) 🛑 ---
+
+def create_sequences_and_labels(df_features_unscaled, sequence_length=100, lookahead_bars=1, hold_threshold_pct=0.0005):
     """
-    Prepares data into sequences (X) and next-bar direction labels (Y).
-    Labeling: 1 for Buy (price goes up), 0 for Sell/Hold (price stays same or drops).
+    รับ Unscaled Features (12 cols), สร้าง Unscaled X (3D) และ Labels y (1D)
     """
     X, y = [], []
-    df_values = df.values
     
-    # ตรรกะการสร้าง Label: Price Up vs. Price Down/Same
-    # 🚨 NOTE: ต้องมี lookahead_bars เพื่อดูอนาคต 1 แท่ง
+    # 1. 🛑 [FIX] คัดลอก DF เพื่อป้องกัน Warning
+    df = df_features_unscaled.copy() 
     
-    # คำนวณ Label
-    # y[i] = 1 ถ้า Close[i + lookahead_bars] > Close[i]
-    # y[i] = 0 ถ้า Close[i + lookahead_bars] <= Close[i]
+    # 2. 🛑 [FIX] เก็บชื่อ 12 features ไว้ก่อน
+    feature_cols = list(df.columns)
     
-    df['Target'] = np.where(df['close'].shift(-lookahead_bars) > df['close'], 1, 0)
+    # 3. คำนวณ % การเปลี่ยนแปลง (จาก 'close' ที่ยังไม่ scale)
+    future_price = df['close'].shift(-lookahead_bars)
+    current_price = df['close']
+    df['pct_change'] = (future_price - current_price) / current_price
+
+    # 4. สร้าง Labels
+    def labeler(pct):
+        if pct > hold_threshold_pct:
+            return 1 # BUY
+        elif pct < -hold_threshold_pct:
+            return 2 # SELL
+        else:
+            return 0 # HOLD
+    df['Target'] = df['pct_change'].apply(labeler)
     
-    # ลบแถวสุดท้ายที่ไม่มี Target
-    df.dropna(subset=['Target'], inplace=True)
+    # 5. ลบแถว NaN (สำคัญมาก)
+    df.dropna(inplace=True) 
     
-    # สร้าง Sequences
+    # 6. สร้าง Sequences
     for i in range(len(df) - sequence_length):
-        X.append(df.iloc[i:i+sequence_length][df.columns[:-1]].values) # Features
-        y.append(df.iloc[i+sequence_length-1]['Target']) # Target สำหรับแท่งสุดท้ายของ Sequence
+        # 🛑 [FIX] เลือกเฉพาะ 12 features (โดยใช้ชื่อ)
+        X.append(df.iloc[i:i+sequence_length][feature_cols].values) 
+        
+        # 🛑 [FIX] y คือ Target ของแท่ง "ปัจจุบัน" (i + sequence_length - 1)
+        y.append(df.iloc[i+sequence_length-1]['Target']) 
 
     return np.array(X), np.array(y)
-
 
 # 🛑 C. SCALING (ใช้ MinMaxScaler) 🛑
 def scale_features(train_df, test_df=None, scaler=None):
@@ -232,25 +256,30 @@ def scale_features(train_df, test_df=None, scaler=None):
 # 🛑 D. BUILD GRU MODEL (โครงสร้างมาตรฐาน) 🛑
 def build_gru_model(input_shape):
     """
-    Defines the GRU-RNN model architecture.
-     input_shape จะเป็น (sequence_length, 11)
+    [Simplified Model] ลดความซับซ้อนเพื่อสู้กับ Overfitting
     """
-    print(f"Building model with Input Shape: {input_shape}") # <-- เพิ่ม log
+    print(f"Building 3-Class (Simplified) model with Input Shape: {input_shape}")
     
     model = Sequential([
-        Input(shape=input_shape), # <-- input_shape ใหม่
-        # 1st GRU Layer
-        GRU(units=128, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.001)),
-        Dropout(0.3),
-        # 2nd GRU Layer
-        GRU(units=64, return_sequences=False, activation='tanh', kernel_regularizer=l2(0.001)),
-        Dropout(0.3),
-        # Output Layer
-        Dense(units=1, activation='sigmoid')
+        Input(shape=input_shape), 
+        
+        # ⬇️ ลด Units จาก 128 -> 64
+        # ⬇️ เพิ่ม Dropout จาก 0.3 -> 0.4
+        GRU(units=64, return_sequences=True, activation='tanh', kernel_regularizer=l2(0.001)),
+        Dropout(0.4), 
+        
+        # ⬇️ ลด Units จาก 64 -> 32
+        # ⬇️ เพิ่ม Dropout จาก 0.3 -> 0.4
+        GRU(units=32, return_sequences=False, activation='tanh', kernel_regularizer=l2(0.001)),
+        Dropout(0.4),
+        
+        # (Output Layer เหมือนเดิม)
+        Dense(units=3, activation='softmax')
     ])
     
     optimizer = Adam(learning_rate=0.001)
-    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
+    
+    model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
     
     return model
 
