@@ -8,7 +8,8 @@
 input string APIServerURL = "http://127.0.0.1:5000"; 
 input int    LookbackBars = 50;  
 input int    MagicNumber  = 12345;
-input double Lots         = 0.01;
+input double RiskPercent = 1.0; // 1.0 = เสี่ยง 1% ของพอร์ตต่อการเทรด
+input double MaxLotSize  = 1.0; // Lot สูงสุดที่อนุญาต (ป้องกันการคำนวณผิดพลาด)
 input double ProbThreshold = 0.50; // minimum probability to act on signal
 input int    MinTradeIntervalMins = 1; // minimum minutes between trades
 
@@ -16,12 +17,15 @@ input int    MinTradeIntervalMins = 1; // minimum minutes between trades
 input double SL_Multiplier = 2.0; // SL = ATR * 2.0
 input double TP_Multiplier = 3.0; // TP = ATR * 3.0
 
+// --- ⬇️ [เพิ่ม] 3 บรรทัดนี้สำหรับ Trailing Stop ⬇️ ---
+input bool   UseTrailingStop = true;    // เปิด/ปิด การลาก SL
+input int    TrailingStartPoints = 1000; // (Points) เริ่มลาก SL เมื่อกำไร 1000 จุด
+input int    TrailingDistancePoints = 500; // (Points) ลาก SL ให้ห่างจากราคา 500 จุด
+
 //--- Global Variables
 string BotStatus = "STOPPED"; 
 string LastSignal = "NONE";
 datetime LastSignalTime = 0;
-double LastProbability = 0.0;
-
 double LastProbability = 0.0;
 
 // --- ⬇️ แก้ไข 2 บรรทัดนี้ ⬇️ ---
@@ -87,34 +91,38 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
+// --- 🛑 [แทนที่ฟังก์ชันนี้] (เวอร์ชัน Trailing Stop) 🛑 ---
 void OnTick()
 {
-    // 1. ตรวจสอบแท่งเทียนใหม่ (สำคัญมากสำหรับ M5)
+    // --- ⬇️ [ใหม่] 1. Logic การลาก SL (Trailing Stop) ⬇️ ---
+    // ส่วนนี้ต้องทำงานทุก Tick (นอก if) เพื่อลาก SL ตามราคา
+    HandleTrailingStops();
+    
+    // --- ⬇️ [เดิม] 2. Logic การเปิดออเดอร์ (New Bar) ⬇️ ---
+    // ส่วนนี้ทำงานเฉพาะเมื่อมีแท่งเทียน M5 ใหม่เท่านั้น
+    
     static datetime prev_time = 0;
     MqlRates rates[];
     if (CopyRates(_Symbol, PERIOD_M5, 0, 1, rates) < 1) return;
     datetime current_time = rates[0].time;
     
-    // ทำงานเมื่อมีแท่งเทียน M5 ใหม่เท่านั้น
     if (current_time > prev_time)
     {
         prev_time = current_time;
         
-        // 2. ดึงสถานะ Bot จาก API (เพื่อรับคำสั่ง START/STOP จาก Telegram)
+        // 2. ดึงสถานะ Bot จาก API
         CheckBotStatus(); 
         
         if (BotStatus == "RUNNING")
         {
-            // โค้ดใหม่ (ขอเผื่อเป็น 200 แท่ง)
+            // 3. ดึงข้อมูล OHLCV ล่าสุด
             int requestBars = MathMax(LookbackBars, 100) + 100; 
             string data_json = GetXAUUSDDataJSON(requestBars);
             
             // 4. ส่งข้อมูลไปยัง Flask API และรับสัญญาณ
             string signal = GetSignalFromAPI(data_json);
 
-            // 5. Behavior: Execute trade if signal is strong AND there is NO existing position
-            
-            // 🛑 รวม Logic ของ BUY และ SELL เข้าด้วยกัน เพื่อให้ใช้เงื่อนไขเดียวกัน
+            // 5. Logic การตัดสินใจ (เหมือนเดิม)
             if (signal == "BUY" || signal == "SELL") 
             {
                 int totalPositions = PositionsTotal();
@@ -134,14 +142,13 @@ void OnTick()
                     {
                         Print("DEBUG: Skipping BUY - probability (", DoubleToString(LastProbability,6), ") < threshold (", DoubleToString(ProbThreshold,2), ").");
                     }
-                    // 2. ตรวจสอบ Probability ของ SELL (ต้องใช้ 1.0 ลบ)
+                    // 2. ตรวจสอบ Probability ของ SELL
                     else if (signal == "SELL" && (1.0 - LastProbability) < ProbThreshold)
                     {
-                        // คำนวณ Prob ของ SELL เพื่อแสดงผล
                         double sell_prob = 1.0 - LastProbability;
                         Print("DEBUG: Skipping SELL - probability (", DoubleToString(sell_prob,6), ") < threshold (", DoubleToString(ProbThreshold,2), ").");
                     }
-                    // 3. ตรวจสอบเงื่อนไขอื่นๆ (เหมือนเดิม)
+                    // 3. ตรวจสอบ MinTradeInterval
                     else if (secondsSinceLast < MinTradeIntervalMins * 60)
                     {
                         Print("DEBUG: Skipping ", signal, " - within MinTradeInterval (", IntegerToString(secondsSinceLast), "s).");
@@ -150,7 +157,7 @@ void OnTick()
                     else
                     {
                         Print("DEBUG: Conditions met - attempting ExecuteTrade(\"", signal, "\").");
-                        ExecuteTrade(signal);
+                        ExecuteTrade(signal); // ⬅️ เรียกใช้ ExecuteTrade (Dynamic Lot)
                     }
                 }
                 else
@@ -160,7 +167,7 @@ void OnTick()
             }
         }
         
-        // 6. อัปเดตสถานะบัญชีไปยัง API ทุกๆ 1 แท่ง M5
+        // 6. อัปเดตสถานะบัญชี (เหมือนเดิม)
         static int update_counter = 0;
         update_counter++;
         if (update_counter >= 1) 
@@ -314,47 +321,79 @@ string GetSignalFromAPI(string data_json)
 //+------------------------------------------------------------------+
 //| (D) Execute Trade - [VERSION 2-Step]                             |
 //+------------------------------------------------------------------+
-// --- 🛑 [แทนที่ฟังก์ชันนี้] 🛑 ---
+// --- 🛑 [แทนที่ฟังก์ชันนี้] (เวอร์ชัน Dynamic Lot) 🛑 ---
 void ExecuteTrade(string signal)
 {
-    // ... (ส่วนตรวจสอบ Trading Allowed / Volume / Tick Data เหมือนเดิม) ...
-    // --- ⬇️ (โค้ดส่วนนี้เหมือนเดิม) ⬇️ ---
-    if (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) == 0 || AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 0)
+    // --- 1. ตรวจสอบเงื่อนไขเบื้องต้น (เหมือนเดิม) ---
+    if (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) == 0 || AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 0) { return; }
+    if (PositionSelect(_Symbol)) { return; }
+
+    // --- 2. 🛑 [ใหม่] คำนวณ Lot Size อัตโนมัติ ---
+    
+    // 2.1 ตรวจสอบว่ามีค่า ATR
+    if (LastATR <= 0.0)
     {
-        Print("❌ Trading not allowed by terminal or account settings. Skipping trade.");
+        Print("❌ ExecuteTrade Error: Invalid LastATR (<= 0.0). Cannot calculate Dynamic Lot.");
         return;
     }
-    if (PositionSelect(_Symbol))
+    
+    // 2.2 คำนวณระยะ SL (เป็น "ราคา" ไม่ใช่ "Points")
+    double sl_distance = LastATR * SL_Multiplier; // เช่น 2.50 (ATR) * 2.0 (ตัวคูณ) = $5.00
+    
+    if (sl_distance <= 0.0)
     {
-        Print("⚠️ Existing position detected for symbol ", _Symbol, " - skipping open inside ExecuteTrade.");
+        Print("❌ ExecuteTrade Error: Invalid SL Distance (<= 0.0).");
         return;
     }
+
+    // 2.3 คำนวณความเสี่ยง
+    double risk_amount = AccountInfoDouble(ACCOUNT_BALANCE) * (RiskPercent / 100.0); // เช่น $1000 * (1.0 / 100) = $10
+    double contract_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE); // เช่น 100 (สำหรับ XAUUSD)
+    
+    // 2.4 คำนวณ Lot
+    // (สูตร: Lot = (เงินที่เสี่ยงได้) / (ระยะ SL * ขนาดสัญญา))
+    double calculated_lots = risk_amount / (sl_distance * contract_size);
+    
+    // --- 3. 🛑 [ใหม่] Volume Normalization (ใช้ Lot ที่คำนวณได้) ---
     MqlTradeRequest request;
     MqlTradeResult  result;
     ZeroMemory(request);
     ZeroMemory(result);
+    
     double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
     double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
     double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-    double volume = Lots; 
+    
+    // ใช้ Lot ที่คำนวณได้ (ไม่ใช่ input Lots)
+    double volume = calculated_lots; 
+    
+    // ปรับ Lot ให้ตรงตามขั้นต่ำ (min) และขั้นตอน (step)
     if (lotStep > 0) volume = MathFloor(volume / lotStep) * lotStep;
-    volume = MathMax(minLot, MathMin(maxLot, volume));
-    if (volume < minLot) { Print("❌ Computed volume below minimum. min=", minLot, " computed=", volume); return; }
+    
+    // จำกัด Lot ไม่ให้เกิน MaxLot ที่เราตั้งไว้ และไม่ต่ำกว่า MinLot
+    volume = MathMax(minLot, MathMin(MaxLotSize, volume)); 
+    
+    if (volume < minLot) 
+    { 
+        Print("❌ Computed volume (", DoubleToString(volume, 2), ") below minimum (", DoubleToString(minLot, 2), ")"); 
+        return; 
+    }
+
+    // --- 4. ส่งออเดอร์ (Step 1) (เหมือนเดิม) ---
     request.action    = TRADE_ACTION_DEAL;
     request.symbol    = _Symbol;
-    request.volume    = volume;
+    request.volume    = volume; // ⬅️ ใช้ Volume ที่คำนวณใหม่
     request.deviation = 50;
     request.magic     = MagicNumber;
     request.type_filling = ORDER_FILLING_IOC; 
     request.type_time    = ORDER_TIME_GTC;
-    request.sl = 0.0; // ⬅️ ส่ง 0.0 ไปก่อน (เหมือนเดิม)
+    request.sl = 0.0; 
     request.tp = 0.0;
+    
     MqlTick tick;
     if(!SymbolInfoTick(_Symbol, tick)) { Print("❌ Failed to get tick"); return; }
     if (TimeCurrent() - tick.time > 10) { Print("⚠️ Tick data is stale"); return; }
-    // --- ⬆️ (โค้ดส่วนนี้เหมือนเดิม) ⬆️ ---
 
-    // --- 3. BUY/SELL Logic (ตั้งค่า Price เท่านั้น) ---
     if (signal == "BUY")
     {
         request.type    = ORDER_TYPE_BUY;
@@ -369,20 +408,15 @@ void ExecuteTrade(string signal)
     }
     else { return; }
 
-    // --- 4. Order Send (Step 1) ---
-    Print("INFO: Attempting OrderSend (Step 1: Market Order) for ", signal);
+    Print("INFO: Attempting OrderSend (Step 1: Market Order) for ", signal, " [Dynamic Lot: ", DoubleToString(volume, 2), "]");
     bool sent = OrderSend(request, result);
     Print("DEBUG: OrderSend (Market) returned sent=", sent, " retcode=", result.retcode, " deal=", result.deal);
           
-    // --- 5. 🛑 [แก้ไข] 🛑 Modify SL/TP AFTER order is open ---
+    // --- 5. ส่งคำสั่ง Modify (Step 2) (เหมือนเดิม) ---
     if (sent && (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED))
     {
         Print("✅ Order Opened. Deal ticket: ", (string)result.deal, ". Now attempting (Step 2: Set Dynamic SL/TP)...");
-        
-        // --- ⬇️ [แก้ไข] ⬇️ ---
-        // ส่งค่า ATR ที่ได้จาก API (Global Variable) เข้าไปในฟังก์ชัน Modify
         ModifyOrderSLTP(result.deal, signal, LastATR); 
-        // --- ⬆️ [แก้ไข] ⬆️ ---
         
         string alert_msg = StringFormat("✅ %s Order Opened: Price %.5f, Lots %.2f", signal, request.price, volume);
         SendTradeAlert(alert_msg);
@@ -534,6 +568,100 @@ void ModifyOrderSLTP(ulong deal_ticket, string signal, double atr_value)
     else
     {
         Print("❌ ModifyOrderSLTP failed (Dynamic ATR): retcode=", result_mod.retcode, " comment=", result_mod.comment);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| (G) Handle Trailing Stop Logic                                   |
+//+------------------------------------------------------------------+
+void HandleTrailingStops()
+{
+    // 1. ตรวจสอบว่าผู้ใช้เปิดใช้งานหรือไม่
+    if (!UseTrailingStop)
+    {
+        return;
+    }
+    
+    // 2. ตรวจสอบว่ามี Position เปิดอยู่หรือไม่
+    if (!PositionSelect(_Symbol))
+    {
+        return;
+    }
+    
+    // 3. ดึงข้อมูล Position
+    ulong position_ticket = PositionGetInteger(POSITION_TICKET);
+    long position_type = PositionGetInteger(POSITION_TYPE); // 0=BUY, 1=SELL
+    double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+    double current_sl = PositionGetDouble(POSITION_SL);
+    double current_tp = PositionGetDouble(POSITION_TP); // ⬅️ เราต้องใช้ TP เดิม
+    
+    MqlTick tick;
+    if(!SymbolInfoTick(_Symbol, tick)) { return; } // ดึงราคาปัจจุบัน
+
+    double new_sl_price = 0.0;
+    double profit_points = 0.0;
+
+    // --- 4. คำนวณสำหรับฝั่ง BUY ---
+    if (position_type == POSITION_TYPE_BUY)
+    {
+        // คำนวณ SL ใหม่ (ห่างจากราคา Bid ปัจจุบัน)
+        new_sl_price = NormalizeDouble(tick.bid - (TrailingDistancePoints * _Point), _Digits);
+        // คำนวณกำไรปัจจุบัน (เป็น Points)
+        profit_points = (tick.bid - open_price) / _Point;
+        
+        // ถ้ากำไรถึงจุดที่เริ่มลาก (Start) และ SL ใหม่สูงกว่า SL เดิม
+        if (profit_points >= TrailingStartPoints && new_sl_price > current_sl)
+        {
+             // SL ใหม่ต้องไม่สูงกว่าราคาปัจจุบัน (ป้องกัน Error)
+             if(new_sl_price >= tick.bid) return;
+             
+             // ส่งคำสั่ง Modify
+             Print("DEBUG: Trailing BUY Stop. Profit: ", profit_points, "p. Moving SL to: ", DoubleToString(new_sl_price, _Digits));
+             SendModifySLTP(position_ticket, new_sl_price, current_tp);
+        }
+    }
+    // --- 5. คำนวณสำหรับฝั่ง SELL ---
+    else if (position_type == POSITION_TYPE_SELL)
+    {
+        // คำนวณ SL ใหม่ (ห่างจากราคา Ask ปัจจุบัน)
+        new_sl_price = NormalizeDouble(tick.ask + (TrailingDistancePoints * _Point), _Digits);
+        // คำนวณกำไรปัจจุบัน (เป็น Points)
+        profit_points = (open_price - tick.ask) / _Point;
+        
+        // ถ้ากำไรถึงจุดที่เริ่มลาก (Start) และ SL ใหม่ต่ำกว่า SL เดิม (และ SL ไม่ใช่ 0)
+        if (profit_points >= TrailingStartPoints && (new_sl_price < current_sl || current_sl == 0.0))
+        {
+             // SL ใหม่ต้องไม่ต่ำกว่าราคาปัจจุบัน (ป้องกัน Error)
+             if(new_sl_price <= tick.ask) return;
+
+             // ส่งคำสั่ง Modify
+             Print("DEBUG: Trailing SELL Stop. Profit: ", profit_points, "p. Moving SL to: ", DoubleToString(new_sl_price, _Digits));
+             SendModifySLTP(position_ticket, new_sl_price, current_tp);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| (H) Helper to send SL/TP modification                            |
+//+------------------------------------------------------------------+
+void SendModifySLTP(ulong position_ticket, double sl_price, double tp_price)
+{
+    MqlTradeRequest request_mod;
+    MqlTradeResult  result_mod;
+    ZeroMemory(request_mod);
+    ZeroMemory(result_mod);
+    
+    request_mod.action = TRADE_ACTION_SLTP;
+    request_mod.position = position_ticket;
+    request_mod.symbol = _Symbol;
+    request_mod.sl = sl_price;
+    request_mod.tp = tp_price;
+    
+    bool modified = OrderSend(request_mod, result_mod);
+    
+    if(!modified)
+    {
+        Print("❌ SendModifySLTP failed: retcode=", result_mod.retcode, " comment=", result_mod.comment);
     }
 }
 
