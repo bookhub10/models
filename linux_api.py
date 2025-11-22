@@ -226,7 +226,7 @@ def run_news_scheduler():
 def download_model_assets():
     """Download model and scaler from GitHub."""
     GITHUB_FILES = {
-        'stable_model': {
+        'v6_model': {
             'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v6_stable_backtest.h5', 
             'filename': Config.V6_MODEL_PATH
         },
@@ -244,7 +244,7 @@ def download_model_assets():
         }
     }
 
-    os.makedirs(os.path.dirname(Config.MODEL_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(Config.V6_MODEL_PATH), exist_ok=True)
 
     for file_info in GITHUB_FILES.values():
         url = file_info['url']
@@ -751,4 +751,5 @@ if __name__ == '__main__':
         print("💡 NOTE: Remember to start the separate telegram_bot.py script.")
         app.run(host='0.0.0.0', port=5000)
     else:
+
         print("❌ FATAL: Could not load v6 model/scaler. API not starting.")
