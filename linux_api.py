@@ -227,19 +227,19 @@ def download_model_assets():
     """Download model and scaler from GitHub."""
     GITHUB_FILES = {
         'stable_model': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v6_stable_backtest.h5', 
+            'url': 'https://raw.githubusercontent.com/bookhub10/OBot/main/models/v6_stable_backtest.h5', 
             'filename': Config.V6_MODEL_PATH
         },
         'trend_model': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v6_trend_detector.h5', 
+            'url': 'https://raw.githubusercontent.com/bookhub10/OBot/main/models/v6_trend_detector.h5', 
             'filename': Config.TREND_MODEL_PATH
         },
         'sideway_model': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v6_sideway_model.h5', 
+            'url': 'https://raw.githubusercontent.com/bookhub10/OBot/main/models/v6_sideway_model.h5', 
             'filename': Config.SIDEWAY_MODEL_PATH
         },
         'scaler': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/scaler_v6.pkl', 
+            'url': 'https://raw.githubusercontent.com/bookhub10/OBot/main/models/scaler_v6.pkl', 
             'filename': Config.SCALER_PATH
         }
     }
