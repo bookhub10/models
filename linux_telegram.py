@@ -1,15 +1,34 @@
 import telegram
 from telegram.ext import Application, CommandHandler, ContextTypes
 import requests
-import json
 import time
-import asyncio # <-- เพิ่ม import นี้
+import os
+from pathlib import Path
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent / '.env'
+    load_dotenv(dotenv_path=env_path, override=True)
+except ImportError:
+    print("⚠️  Warning: python-dotenv not installed. Trying to read .env manually.")
 
 # --- Configuration ---
-TELEGRAM_TOKEN = '8489959994:AAEzhaqwv6Ds71FkNTRzKFlX7snhOXywtiY' 
-CHAT_ID = 8455945925 
-#API_URL = 'https://lobeliaceous-daysi-overpiteously.ngrok-free.dev' # ngrok URL
-API_URL = 'http://127.0.0.1:5000'# สำหรับทดสอบในเครื่อง
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+CHAT_ID_STR = os.getenv('TELEGRAM_CHAT_ID', '').strip()
+
+# Validate and parse CHAT_ID
+if not TELEGRAM_TOKEN:
+    raise ValueError("❌ TELEGRAM_BOT_TOKEN is not set in .env file!")
+if not CHAT_ID_STR:
+    raise ValueError("❌ TELEGRAM_CHAT_ID is not set in .env file!")
+
+try:
+    CHAT_ID = int(CHAT_ID_STR)
+except ValueError:
+    raise ValueError(f"❌ TELEGRAM_CHAT_ID must be a valid integer, got: {CHAT_ID_STR}")
+
+API_URL = 'http://127.0.0.1:5000'  # สำหรับทดสอบในเครื่อง
 
 # --- Commands ---
 
@@ -58,12 +77,21 @@ async def status_command(update, context):
         response = requests.get(f'{API_URL}/status')
         if response.status_code == 200:
             status_data = response.json()
+            news_status = status_data.get('news_status', 'Unknown')
+            # ⬇️ [ใหม่] อ่านสถานะโมเดล (ปรับแต่งจาก API)
+            v6_loaded = status_data.get('v6_model_loaded', False)
+            trend_loaded = status_data.get('trend_model_loaded', False)
+            sideway_loaded = status_data.get('sideway_model_loaded', False)
+            models_ok = "✅" if (v6_loaded and trend_loaded and sideway_loaded) else "❌"
             
             message = (
                 f"📊 **OBOT STATUS REPORT** 📊\n"
                 f"------------------------------------\n"
                 f"**Bot State:** `{status_data.get('bot_status')}`\n"
+                f"**Last Regime:** `{status_data.get('last_regime', 'N/A')}`\n" # ⬅️ [ใหม่]
                 f"**Last Signal:** `{status_data.get('last_signal')}`\n"
+                f"**News Filter:** `{news_status}`\n" # ⬅️ เพิ่มบรรทัดนี้
+                f"**Models Loaded:** `{models_ok}`\n" # ⬅️ [ใหม่]
                 f"------------------------------------\n"
                 f"**Balance:** ${status_data.get('balance'):,.2f}\n"
                 f"**Equity:** ${status_data.get('equity'):,.2f}\n"
@@ -197,11 +225,18 @@ async def fix_command(update, context):
 
 def main(): 
     """Start the Telegram Bot.""" 
+    
+    print(f"🔐 Using Telegram Token: {TELEGRAM_TOKEN[:10]}...")
+    print(f"📱 Using Chat ID: {CHAT_ID}")
 
     # 1. สร้าง Application และกำหนด post_init callback
-    application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init_callback).build() 
+    try:
+        application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init_callback).build()
+    except telegram.error.InvalidToken as e:
+        print(f"❌ Invalid Telegram Token: {e}")
+        print("💡 Check that TELEGRAM_BOT_TOKEN in .env is correct.")
+        raise 
     
-    # 🛑 Remove the problematic asyncio.run() block here
 
     # 2. Add command handlers 
     application.add_handler(CommandHandler("start", start_command)) 
