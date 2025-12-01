@@ -1,91 +1,84 @@
 //+------------------------------------------------------------------+
-//|                        OBotTrading.mq5                        |
+//|                        OBotTrading_v6.2.mq5                      |
 //+------------------------------------------------------------------+
 #property copyright "OakJkpG OBot Project"
-#property version   "6.10" 
-#property description "RNN(GRU) 19-Feature (v6.1) H4 Trend Filter"
-// --- Inputs (v6) ---
+#property version   "7.00" 
+#property description "RNN(GRU) v7.0"
+
+// --- Inputs (v6.2) ---
 input string APIServerURL = "http://127.0.0.1:5000";
-input int    LookbackBars = 3100;// (ใช้ 120 แท่งฝั่ง api)
+input int    LookbackBars = 3100; // (ใช้ 120 แท่งฝั่ง api)
 input int    MagicNumber  = 12345;
 input double MaxLotSize  = 1.0;
-input double ProbThreshold = 0.45; 
+input double ProbThreshold = 0.6; 
+input double MinATR        = 0.5;
 input int    MinTradeIntervalMins = 1;
 input double SL_Multiplier = 1.0;
-input double TP_Multiplier = 1.6; // ⬅️ สำหรับ Trend
-input double TP_Multiplier_Sideway = 1.0; // ⬅️ [ใหม่] สำหรับ Sideway
+input double TP_Multiplier = 1.5;
+
 // --- Trailing Stop Inputs ---
 input bool   UseTrailingStop = true;
-input double TrailingStart_ATR_Mult = 1.5;
+input double TrailingStart_ATR_Mult = 1.4;
 input double TrailingDist_ATR_Mult = 0.9; 
-input int    MaxHoldBars = 12; // (ตรงกับ LOOKAHEAD_BARS ใหม่)
+input int    MaxHoldBars = 12;
+
 // --- Time Filter Inputs ---
-input bool   UseTimeFilter = false;      
-input string LondonOpen_BrokerTime = "10:00";
-input string NYOpen_BrokerTime = "15:00";   
-input int    FilterMinutes = 15;
+input bool   UseTimeFilter  = true;     // เปิดใช้งาน Filter
+input int    TradeStartHour = 8;        // เริ่มเทรด 8 โมง (Broker Time)
+input int    TradeEndHour   = 20;       // จบเทรด 20 โมง (Broker Time)  
+
 // --- Cooldown Filter ---
-input int    TradeCooldownBars = 3; // ⬅️ [v6]
+input int    TradeCooldownBars = 3; 
+
+// --- [v6.2] Intermarket Analysis Inputs ---
+input string IntermarketSymbol = "UsDollar"; // ชื่อ Symbol ดอลลาร์ (ต้องตรงกับใน MT5)
+
+// --- Fail-Safe Inputs (Circuit Breaker) ---
+input int    MaxConsecutiveLosses = 3; // ขาดทุนติดกันได้สูงสุดกี่ครั้ง
+input int    PenaltyPauseHours    = 1; // ถ้าครบกำหนด ให้หยุดพักกี่ชั่วโมง
+
 //--- Global Variables
 string BotStatus = "STOPPED";
 string LastSignal = "NONE"; 
-string LastRegime = "NONE"; // ⬅️ [ใหม่]
+string LastRegime = "NONE"; 
 datetime LastSignalTime = 0;
 double LastProbability = 0.0;
 double LastATR = 0.0;
 int BarsSinceLastClose = 99;
 double LastDynamicRisk = 1.0;
-// --- Fail-Safe Inputs (Circuit Breaker) ---
-input int    MaxConsecutiveLosses = 3;   // ขาดทุนติดกันได้สูงสุดกี่ครั้ง
-input int    PenaltyPauseHours    = 1;   // ถ้าครบกำหนด ให้หยุดพักกี่ชั่วโมง
 
 //--- MQL5 JSON Utilities (Basic Implementation)
-// (ฟังก์ชัน ExtractJsonString, ExtractJsonDouble - ไม่เปลี่ยนแปลง)
-// Function to safely extract a string value from a JSON response
 string ExtractJsonString(string json_data, string key)
 {
     string search = "\"" + key + "\":\"";
     int start_pos = StringFind(json_data, search);
     if (start_pos < 0) return "";
-    
     start_pos += StringLen(search);
     int end_pos = StringFind(json_data, "\"", start_pos);
     if (end_pos < 0) return "";
-    
     return StringSubstr(json_data, start_pos, end_pos - start_pos);
 }
 
-// Function to safely extract a double/numeric value from a JSON response
 double ExtractJsonDouble(string json_data, string key)
 {
     string search = "\"" + key + "\":";
     int start_pos = StringFind(json_data, search);
     if (start_pos < 0) return 0.0;
-    
     start_pos += StringLen(search);
-    
     int end_pos_comma = StringFind(json_data, ",", start_pos);
     int end_pos_brace = StringFind(json_data, "}", start_pos);
-    
     int end_pos = end_pos_comma;
-    if (end_pos < 0 || (end_pos_brace > 0 && end_pos_brace < end_pos_comma))
-    {
-        end_pos = end_pos_brace;
-    }
-    
+    if (end_pos < 0 || (end_pos_brace > 0 && end_pos_brace < end_pos_comma)) end_pos = end_pos_brace;
     if (end_pos < 0) return 0.0;
-    
     return StringToDouble(StringSubstr(json_data, start_pos, end_pos - start_pos));
 }
 
-
-// --- OnTick (ไม่เปลี่ยนแปลง) ---
+// --- OnTick ---
 void OnTick()
 {
-    // --- [v6] ตรวจจับการปิดออเดอร์ (TP/SL/TS) ---
+    // --- ตรวจจับการปิดออเดอร์ ---
     static int prev_positions = 0;
     int current_positions = PositionsTotal();
-
     if (current_positions < prev_positions)
     {
         Print("INFO: Position closed (TP/SL/TS). Starting Cooldown.");
@@ -93,81 +86,74 @@ void OnTick()
     }
     prev_positions = current_positions;
 
-    // --- [NEW] Circuit Breaker Check ---
+    // --- Circuit Breaker Check ---
     int consecutive_losses = 0;
     datetime last_loss_time = 0;
     CheckCircuitBreaker(consecutive_losses, last_loss_time);
-    
     if(consecutive_losses >= MaxConsecutiveLosses)
     {
-       // คำนวณเวลาที่ผ่านไปตั้งแต่ขาดทุนไม้ล่าสุด
        long seconds_passed = TimeCurrent() - last_loss_time;
        long penalty_seconds = PenaltyPauseHours * 3600;
-       
        if(seconds_passed < penalty_seconds)
        {
-           // ยังไม่ครบเวลาทำโทษ ให้ return ออกไปเลย (ไม่เทรด)
            string remaining = TimeToString((datetime)(penalty_seconds - seconds_passed), TIME_MINUTES|TIME_SECONDS);
            Comment("⛔ CIRCUIT BREAKER ACTIVE ⛔\nLosses: ", consecutive_losses, "\nWaiting: ", remaining);
-           return; 
+           return;
        }
     }
 
-    // --- 1. [ทำงานทุก Tick] จัดการออเดอร์ที่เปิดอยู่ ---
     HandleTrailingStops();
     HandleTimeExit();
-    // --- 2. [ทำงานครั้งเดียวต่อแท่ง] ตรรกะการตัดสินใจ ---
+
+    // --- ตรรกะการตัดสินใจ ---
     static datetime prev_time = 0;
     MqlRates rates[];
     if (CopyRates(_Symbol, PERIOD_M5, 0, 1, rates) < 1) return;
     datetime current_time = rates[0].time;
+    
     if (current_time > prev_time)
     {
         prev_time = current_time;
-        // [v6] เพิ่มตัวนับ Cooldown
         BarsSinceLastClose++;
-        
-        // 3. ตรวจสอบสถานะ Bot
         CheckBotStatus();
-        if (BotStatus != "RUNNING")
-        {
-            return;
-        }
+        if (BotStatus != "RUNNING") return;
 
-        // 4. ตรวจสอบ Time Filter ("Kill Switch")
-        if (IsInChaoticZone(current_time))
+        // --- [แก้ไข] Time Filter Logic ใหม่ ---
+        if (UseTimeFilter)
         {
-            Print(StringFormat("INFO: In Chaotic Zone (First %d mins of Open). Skipping trade checks.", FilterMinutes));
-            return;
+            MqlDateTime dt;
+            TimeToStruct(current_time, dt);
+            
+            // ถ้าชั่วโมงปัจจุบัน น้อยกว่า Start หรือ มากกว่า End -> ห้ามเทรด
+            if (dt.hour < TradeStartHour || dt.hour > TradeEndHour)
+            {
+                // (Optional) Print บอกแค่ครั้งเดียวตอนเปลี่ยนชั่วโมงเพื่อไม่ให้รก Log
+                static int last_print_hour = -1;
+                if (dt.hour != last_print_hour) {
+                    Print(StringFormat("INFO: Outside Trading Hours (%02d:00). Waiting for %02d:00.", dt.hour, TradeStartHour));
+                    last_print_hour = dt.hour;
+                }
+                return; // ⛔ จบการทำงาน ไม่ส่งไปถาม Python
+            }
         }
         
-        // --- 5. "สมอง" (ML) วิเคราะห์ "ทุกแท่ง" ---
+        // --- [v6.2] ส่งข้อมูล Multi-Asset ---
         int requestBars = LookbackBars;
-        string data_json = GetXAUUSDDataJSON(requestBars);
-        string ml_signal = GetSignalFromAPI(data_json); // (BUY, SELL, HOLD)
+        string data_json = GetMultiAssetDataJSON(requestBars);
+        string ml_signal = GetSignalFromAPI(data_json);
             
-        // 6. กรองสัญญาณ ML (Prob, Interval)
-        if (LastProbability < ProbThreshold)
-        {
-             ml_signal = "HOLD";
-        }
+        if (LastProbability < ProbThreshold) ml_signal = "HOLD";
+        
         datetime now = TimeCurrent();
         int secondsSinceLast = (int)(now - LastSignalTime);
-        if (secondsSinceLast < MinTradeIntervalMins * 60 && ml_signal != LastSignal)
-        {
-             ml_signal = "HOLD";
-        }
+        if (secondsSinceLast < MinTradeIntervalMins * 60 && ml_signal != LastSignal) ml_signal = "HOLD";
         
-        Print(StringFormat("OBot v6 (H4 Filter/R:R 1:1.5): Signal=%s (Prob:%.2f), Cooldown: %d/%d", 
+        Print(StringFormat("OBot v6.2 (Intermarket): Signal=%s (Prob:%.2f), Cooldown: %d/%d", 
                 ml_signal, LastProbability, BarsSinceLastClose, TradeCooldownBars));
-                
-        // --- 7. ตรรกะตัดสินใจ (แยก 2 กรณี) ---
         
         if (PositionSelect(_Symbol))
         {
-            // --- 7A. [v6] ตรวจสอบสัญญาณขัดแย้ง (Conflict Exit) ---
             long position_type = PositionGetInteger(POSITION_TYPE);
-            
             if (position_type == POSITION_TYPE_BUY && ml_signal == "SELL")
             {
                 Print("❌ CONFLICT EXIT: ML Signal changed to SELL. Closing BUY position.");
@@ -181,13 +167,17 @@ void OnTick()
         }
         else
         {
-            // --- 7B. [v6] หาจังหวะเข้าใหม่ (New Entry + Cooldown) ---
-            
             if (BarsSinceLastClose > TradeCooldownBars)
             {
-                if (ml_signal == "BUY")
+                // --- 🔥 เพิ่มการเช็ค MinATR ตรงนี้ 🔥 ---
+                if (LastATR < MinATR)
                 {
-                    
+                     // ถ้า ATR ต่ำกว่าเกณฑ์ ให้ข้าม ไม่ต้องเทรด
+                     // Print("⚠️ Low Volatility (ATR: ", LastATR, " < ", MinATR, "). Skipping.");
+                }
+                else if (ml_signal == "BUY") // ถ้าผ่านเกณฑ์ค่อยเช็ค Signal
+                {
+             
                     Print("✅ GO: ML Signal is BUY. Executing BUY.");
                     ExecuteTrade("BUY", LastATR);
                 }
@@ -199,7 +189,6 @@ void OnTick()
             }
         }
         
-        // 8. อัปเดตสถานะบัญชี (เหมือนเดิม)
         static int update_counter = 0;
         update_counter++;
         if (update_counter >= 1)
@@ -214,7 +203,6 @@ void OnTick()
 //| CUSTOM FUNCTIONS                                                 |
 //+------------------------------------------------------------------+
 
-// (A) Check Bot Status from API (ไม่เปลี่ยนแปลง)
 void CheckBotStatus()
 {
     string status_url = "/status";
@@ -239,9 +227,6 @@ void CheckBotStatus()
     }
 }
 
-
-// 🛑 [v6] (ฟังก์ชันที่ 1) - เพิ่ม 'real_volume' 🛑
-// เราสร้างฟังก์ชันนี้ขึ้นมาเพื่อลดการเขียนโค้ดซ้ำ
 string GetRatesJSON(string symbol, ENUM_TIMEFRAMES timeframe, int bars)
 {
     MqlRates rates[];
@@ -253,14 +238,11 @@ string GetRatesJSON(string symbol, ENUM_TIMEFRAMES timeframe, int bars)
     }
 
     string json_array = "[";
-    // เรียงข้อมูลจากเก่า -> ใหม่
     for(int idx = copied - 1, j = 0; idx >= 0; idx--, j++)
     {
-        // 🛑 [v6] เพิ่ม real_volume
         string item = StringFormat(
             "{\"time\":%d, \"open\":%.5f, \"high\":%.5f, \"low\":%.5f, \"close\":%.5f, \"tick_volume\":%d, \"real_volume\":%d}",
             (long)rates[idx].time, rates[idx].open, rates[idx].high, rates[idx].low, rates[idx].close, rates[idx].tick_volume, rates[idx].real_volume);
-        
         json_array += item;
         if (j < copied - 1) json_array += ",";
     }
@@ -268,33 +250,32 @@ string GetRatesJSON(string symbol, ENUM_TIMEFRAMES timeframe, int bars)
     return json_array;
 }
 
-
-// 🛑 [v6] (ฟังก์ชันที่ 2) - ส่ง XAU M5,M30,H1,H4 🛑
-string GetXAUUSDDataJSON(int m5_bars)
+// 🛑 [v6.2] (ฟังก์ชันที่ 2) - ส่ง Multi-Asset (XAU + USD) 🛑
+string GetMultiAssetDataJSON(int m5_bars)
 {
-    // คำนวณจำนวนแท่งที่สอดคล้องกัน (เผื่อไว้)
-    int m30_bars = (m5_bars / 6) + 50;
-    int h1_bars = (m5_bars / 12) + 250;
-    int h4_bars = (m5_bars / 48) + 300; // ⬅️ [v6]
-
-    // 1. ดึงข้อมูล XAUUSD (M5, M30, H1, H4)
+    // 1. XAUUSD Data (M5 Only)
     string m5_json = GetRatesJSON(_Symbol, PERIOD_M5, m5_bars);
-    string m30_json = GetRatesJSON(_Symbol, PERIOD_M30, m30_bars);
-    string h1_json = GetRatesJSON(_Symbol, PERIOD_H1, h1_bars);
-    string h4_json = GetRatesJSON(_Symbol, PERIOD_H4, h4_bars); // ⬅️ [v6]
+    
+    // 2. Intermarket Data (UsDollar M5 Only)
+    string usd_m5_json = "[]";
+    if (SymbolSelect(IntermarketSymbol, true))
+    {
+        usd_m5_json = GetRatesJSON(IntermarketSymbol, PERIOD_M5, m5_bars);
+    }
+    else
+    {
+        Print("⚠️ Warning: Intermarket Symbol '", IntermarketSymbol, "' not found.");
+    }
 
-    // 2. 🛑 [v6] ประกอบร่าง JSON (ลบ proxy, เพิ่ม h4)
+    // สร้าง JSON ที่เล็กลง (ส่ง field ว่างไปหลอก Python ในส่วนที่ไม่ใช้)
     string final_json = StringFormat(
-        "{\"m5_data\":%s, \"m30_data\":%s, \"h1_data\":%s, \"h4_data\":%s}",
-        m5_json,
-        m30_json,
-        h1_json,
-        h4_json    
+        "{\"m5_data\":%s, \"usd_m5\":%s, \"m30_data\":[], \"h1_data\":[], \"h4_data\":[], \"usd_h1\":[]}",
+        m5_json, usd_m5_json    
     );
+    
     return final_json;
 }
 
-// --- GetSignalFromAPI (ไม่เปลี่ยนแปลง) ---
 string GetSignalFromAPI(string data_json)
 {
     string predict_url = "/predict";
@@ -317,25 +298,18 @@ string GetSignalFromAPI(string data_json)
         double probability = ExtractJsonDouble(json_response, "probability");
         double atr_value = ExtractJsonDouble(json_response, "atr");
         double dynamic_risk = ExtractJsonDouble(json_response, "dynamic_risk");
-        string regime = ExtractJsonString(json_response, "regime"); // ⬅️ [ใหม่]
+        string regime = ExtractJsonString(json_response, "regime"); 
         
         Print(StringFormat("DEBUG: Parsed Regime=%s, Signal=%s, Prob=%.4f, ATR=%.4f, DynRisk=%.1f%%",
               regime, signal, probability, atr_value, dynamic_risk));
-              
-        // update globals
+
         LastProbability = probability;
         LastSignal = signal;
         LastATR = atr_value;
-        LastRegime = (regime == "") ? "NONE" : regime; // ⬅️ [ใหม่]
+        LastRegime = (regime == "") ? "NONE" : regime; 
         
-        if (dynamic_risk > 0.0)
-        {
-            LastDynamicRisk = dynamic_risk;
-        }
-        else
-        {
-            LastDynamicRisk = 1.0;
-        }
+        if (dynamic_risk > 0.0) LastDynamicRisk = dynamic_risk;
+        else LastDynamicRisk = 1.0;
         
         return LastSignal;
     }
@@ -344,33 +318,22 @@ string GetSignalFromAPI(string data_json)
         Print("Error getting signal: HTTP " + IntegerToString(res));
         LastATR = 0.0;
         LastDynamicRisk = 1.0; 
-        LastRegime = "NONE"; // ⬅️ [ใหม่]
+        LastRegime = "NONE"; 
         return "NONE";
     }
 }
 
-// --- ExecuteTrade (ไม่เปลี่ยนแปลง) ---
 void ExecuteTrade(string signal, double atr_value)
 {
-    if (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) == 0 || AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 0) { return; }
-    if (PositionSelect(_Symbol)) { return; }
+    if (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) == 0 || AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 0) return;
+    if (PositionSelect(_Symbol)) return;
 
-    if (atr_value <= 0.0)
-    {
-        Print("❌ ExecuteTrade Error: Invalid LastATR (<= 0.0).");
-        return;
-    }
+    if (atr_value <= 0.0) { Print("❌ ExecuteTrade Error: Invalid LastATR."); return; }
     
     double sl_distance = atr_value * SL_Multiplier;
-    if (sl_distance <= 0.0)
-    {
-        Print("❌ ExecuteTrade Error: Invalid SL Distance (<= 0.0).");
-        return;
-    }
+    if (sl_distance <= 0.0) return;
 
     double risk_amount = AccountInfoDouble(ACCOUNT_BALANCE) * (LastDynamicRisk / 100.0);
-    Print(StringFormat("DEBUG: Calculating Lot Size based on Dynamic Risk: %.2f %%", LastDynamicRisk));
-    
     double contract_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
     double calculated_lots = risk_amount / (sl_distance * contract_size);
 
@@ -385,11 +348,7 @@ void ExecuteTrade(string signal, double atr_value)
     double volume = calculated_lots;
     if (lotStep > 0) volume = MathFloor(volume / lotStep) * lotStep;
     volume = MathMax(minLot, MathMin(MaxLotSize, volume));
-    if (volume < minLot)
-    { 
-        Print("❌ Computed volume (", DoubleToString(volume, 2), ") below minimum (", DoubleToString(minLot, 2), ")");
-        return;
-    }
+    if (volume < minLot) return;
 
     request.action    = TRADE_ACTION_DEAL;
     request.symbol    = _Symbol;
@@ -405,40 +364,28 @@ void ExecuteTrade(string signal, double atr_value)
     if(!SymbolInfoTick(_Symbol, tick)) { Print("❌ Failed to get tick"); return; }
     if (TimeCurrent() - tick.time > 10) { Print("⚠️ Tick data is stale"); return; }
 
-    if (signal == "BUY")
-    {
-        request.type    = ORDER_TYPE_BUY;
-        request.comment = "RNN_v6_BUY"; // [v6]
+    if (signal == "BUY") {
+        request.type = ORDER_TYPE_BUY;
+        request.comment = "RNN_v6.2_BUY";
         request.price = tick.ask;
-    }
-    else if (signal == "SELL")
-    {
-        request.type    = ORDER_TYPE_SELL;
-        request.comment = "RNN_v6_SELL"; // [v6]
+    } else if (signal == "SELL") {
+        request.type = ORDER_TYPE_SELL;
+        request.comment = "RNN_v6.2_SELL";
         request.price = tick.bid;
-    }
-    else { return; }
+    } else return;
 
-    Print(StringFormat("INFO: Attempting OrderSend (Step 1: Market) %s [Lot: %.2f]", signal, volume));
     bool sent = OrderSend(request, result);
-    Print("DEBUG: OrderSend (Market) returned sent=", sent, " retcode=", result.retcode, " deal=", result.deal);
-    
     if (sent && (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED))
     {
         Print("✅ Order Opened. Deal: ", (string)result.deal, ". Setting Dynamic SL/TP...");
         ModifyOrderSLTP(result.deal, signal, atr_value);
-        
         string alert_msg = StringFormat("✅ %s Order Opened: Price %.5f, Lots %.2f", signal, request.price, volume);
         SendTradeAlert(alert_msg);
         LastSignalTime = TimeCurrent();
     }
-    else
-    {
-        Print("❌ ", signal, " failed (Step 1): retcode=", result.retcode, " result_comment=", result.comment);
-    }
+    else Print("❌ ", signal, " failed: ", result.retcode, " ", result.comment);
 }
 
-// --- SendAccountStatusToAPI (ไม่เปลี่ยนแปลง) ---
 void SendAccountStatusToAPI(string alert_message = "")
 {
     string update_url = "/update_status";
@@ -446,11 +393,10 @@ void SendAccountStatusToAPI(string alert_message = "")
     double equity = AccountInfoDouble(ACCOUNT_EQUITY);
     double margin_free = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
     int open_trades = PositionsTotal();
-    
     string payload = StringFormat(
         "{\"balance\":%.2f, \"equity\":%.2f, \"margin_free\":%.2f, \"open_trades\":%d, \"alert_message\":\"%s\", \"account_type\":\"%s\"}",
-        balance, equity, margin_free, open_trades, alert_message);
-        
+        balance, equity, margin_free, open_trades, alert_message, "DEMO");
+    
     string headers = "Content-Type: application/json";
     uchar post_data[];
     uchar body[];
@@ -458,19 +404,12 @@ void SendAccountStatusToAPI(string alert_message = "")
     string result_headers;
     int timeout = 5000;
     int data_size = StringToCharArray(payload, post_data, 0, WHOLE_ARRAY);
-    
     ArrayResize(body, data_size);
     for (int i = 0; i < data_size; i++) body[i] = post_data[i];
-
     string full_url = APIServerURL + update_url;
-    int res = WebRequest("POST", full_url, headers, timeout, body, result, result_headers);
-    if (res != 200) 
-    {
-        Print("❌ API Error: SendAccountStatusToAPI failed. HTTP " + IntegerToString(res));
-    }
+    WebRequest("POST", full_url, headers, timeout, body, result, result_headers);
 }
 
-// --- ModifyOrderSLTP (ไม่เปลี่ยนแปลง) ---
 void ModifyOrderSLTP(ulong deal_ticket, string signal, double atr_value)
 {
     if(atr_value <= 0.0)
@@ -500,20 +439,8 @@ void ModifyOrderSLTP(ulong deal_ticket, string signal, double atr_value)
     request_mod.position = position_ticket;
     request_mod.symbol = _Symbol;
     
-    // ⬇️ [ใหม่] ตรรกะเลือก TP Multiplier
-    double tp_mult = TP_Multiplier; // ค่าเริ่มต้น (Trend)
-    if (LastRegime == "SIDEWAY")
-    {
-        tp_mult = TP_Multiplier_Sideway;
-        Print("DEBUG: Using SIDEWAY TP Multiplier: ", DoubleToString(tp_mult, 2));
-    }
-    else
-    {
-        Print("DEBUG: Using TREND TP Multiplier: ", DoubleToString(tp_mult, 2));
-    }
-    // ⬆️ [ใหม่]
-
-    // 🛑 [v6] ใช้ tp_mult ที่เลือก
+    double tp_mult = TP_Multiplier;
+    
     double sl_points_dynamic = (atr_value * SL_Multiplier);
     double tp_points_dynamic = (atr_value * tp_mult); // ⬅️ [แก้ไข]
 
@@ -574,7 +501,6 @@ void ModifyOrderSLTP(ulong deal_ticket, string signal, double atr_value)
     }
 }
 
-// --- HandleTrailingStops (ไม่เปลี่ยนแปลง) ---
 void HandleTrailingStops()
 {
     if (!UseTrailingStop)
@@ -628,7 +554,6 @@ void HandleTrailingStops()
     }
 }
 
-// --- SendModifySLTP (ไม่เปลี่ยนแปลง) ---
 void SendModifySLTP(ulong position_ticket, double sl_price, double tp_price)
 {
     MqlTradeRequest request_mod;
@@ -649,7 +574,6 @@ void SendModifySLTP(ulong position_ticket, double sl_price, double tp_price)
     }
 }
 
-// --- HandleTimeExit (ไม่เปลี่ยนแปลง) ---
 void HandleTimeExit()
 {
     if (MaxHoldBars <= 0) { return; }
@@ -712,51 +636,6 @@ void SendTradeAlert(string alert_message)
     SendAccountStatusToAPI(alert_message);
 }
 
-// --- IsInChaoticZone (ไม่เปลี่ยนแปลง) ---
-bool IsInChaoticZone(datetime current_time)
-{
-    if (!UseTimeFilter)
-    {
-        return false;
-    }
-
-    MqlDateTime time_struct;
-    TimeToStruct(current_time, time_struct);
-    
-    int filter_end_minute = time_struct.min + FilterMinutes;
-    int filter_end_hour = time_struct.hour;
-    
-    if (filter_end_minute >= 60)
-    {
-        filter_end_minute = filter_end_minute - 60;
-        filter_end_hour = filter_end_hour + 1;
-        if (filter_end_hour >= 24) filter_end_hour = 0;
-    }
-
-    int london_open_hour = (int)StringSubstr(LondonOpen_BrokerTime, 0, 2);
-    int london_open_min = (int)StringSubstr(LondonOpen_BrokerTime, 3, 2);
-    
-    int ny_open_hour = (int)StringSubstr(NYOpen_BrokerTime, 0, 2);
-    int ny_open_min = (int)StringSubstr(NYOpen_BrokerTime, 3, 2);
-    
-    if (time_struct.hour == london_open_hour && 
-        time_struct.min >= london_open_min && 
-        time_struct.min < (london_open_min + FilterMinutes))
-    {
-        return true;
-    }
-
-    if (time_struct.hour == ny_open_hour && 
-        time_struct.min >= ny_open_min && 
-        time_struct.min < (ny_open_min + FilterMinutes))
-    {
-        return true;
-    }
-    
-    return false;
-}
-
-// --- ClosePositionByConflict (ไม่เปลี่ยนแปลง) ---
 void ClosePositionByConflict()
 {
     if (!PositionSelect(_Symbol))
@@ -808,7 +687,6 @@ void ClosePositionByConflict()
     }
 }
 
-// ฟังก์ชันนับจำนวนขาดทุนต่อเนื่องล่าสุด และเวลาปิดออเดอร์สุดท้าย
 void CheckCircuitBreaker(int &loss_count, datetime &last_loss_time)
 {
    loss_count = 0;
@@ -846,3 +724,4 @@ void CheckCircuitBreaker(int &loss_count, datetime &last_loss_time)
       }
    }
 }
+//+------------------------------------------------------------------+

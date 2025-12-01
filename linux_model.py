@@ -1,92 +1,173 @@
 import pandas as pd
 import numpy as np
 import talib
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import RobustScaler
 
 # ==============================================================================
-# PART 1.5: FEATURE ENGINEERING (v6.1 - 19 Features)
+# CONFIG: Feature List
+# ==============================================================================
+REQUIRED_FEATURES = [
+    'log_ret_1', 'log_ret_5', 'dist_ema50', 'dist_h1_ema',
+    'body_pct', 'upper_wick_pct', 'lower_wick_pct',
+    'vol_force',
+    'dist_pivot', 'dist_r1', 'dist_s1',
+    'atr_14', 'atr_pct', 'rsi_14',
+    'hour_sin', 'hour_cos',
+    'usd_ret_5', 'usd_corr'
+]
+
+# ==============================================================================
+# PART 1: FEATURE ENGINEERING (Lite + 62b Hybrid)
 # ==============================================================================
 
-# --- 🛑 [อัปเดต] ฟังก์ชันนี้ (v6.1 - 19 Features) ---
-def add_technical_indicators(df_m5, df_m30, df_h1, df_h4):
+def compute_features_lite(df_m5, df_usd=None):
     """
-    เวอร์ชัน v6.1 (แก้ไข): 19 Features
-    (นำโค้ดมาจาก compute_features ของ model.py)
+    สร้าง 18 Features สำหรับ Lite Model (M5 Scalping)
+    รองรับ Intermarket Analysis (USD)
     """
+    # 1. Prepare Data
+    df = df_m5.sort_index().copy()
     
-    df_m5 = df_m5.sort_index().copy()
-    df_m30 = df_m30.sort_index().copy()
-    df_h1 = df_h1.sort_index().copy()
-    df_h4 = df_h4.sort_index().copy()
+    # แปลงเป็น Float64 ให้หมดเพื่อความแม่นยำของ TA-Lib
+    # (ป้องกัน Error ใน Linux บาง Environment)
+    try:
+        open_p = df['open'].astype(float).values
+        high_p = df['high'].astype(float).values
+        low_p  = df['low'].astype(float).values
+        close_p = df['close'].astype(float).values
+        volume = df['tick_volume'].astype(float).values
+    except KeyError as e:
+        print(f"❌ Error: Missing columns in DataFrame. {e}")
+        return pd.DataFrame()
 
-    close = df_m5['close'].astype(float).values
-    high = df_m5['high'].astype(float).values
-    low = df_m5['low'].astype(float).values
-
-    df = df_m5.copy()
-    df['ret_1'] = df['close'].pct_change(1)
-    df['ret_5'] = df['close'].pct_change(5)
-    df['ret_10'] = df['close'].pct_change(10)
-    df['vol_rolling'] = df['tick_volume'].rolling(20).std().fillna(0)
-
-    df['ATR_14'] = talib.ATR(high, low, close, timeperiod=14)
-    k, d = talib.STOCH(high, low, close, 14, 3, 3)
-    df['Stoch_K'] = k
-    macd, macdsig, macdh = talib.MACD(close, 12, 26, 9)
-    df['MACD_Hist'] = macdh
-    df['ADX_14'] = talib.ADX(high, low, close, timeperiod=14)
-
-    df_m30['M30_RSI'] = talib.RSI(df_m30['close'].astype(float).values, timeperiod=14)
-    df_h1['H1_MA_200'] = talib.SMA(df_h1['close'].astype(float).values, timeperiod=200)
-    df_h1['H1_Dist_MA200'] = (df_h1['close'] - df_h1['H1_MA_200']) / df_h1['close']
-    df_h4['H4_MA_50'] = talib.SMA(df_h4['close'].astype(float).values, timeperiod=50)
-    df_h4['H4_Dist_MA50'] = (df_h4['close'] - df_h4['H4_MA_50']) / df_h4['close']
-
-    atr = df['ATR_14'].ffill()
-    ma20 = df['close'].rolling(20).mean()
-    df['k_upper'] = ma20 + 1.5 * atr
-    df['k_lower'] = ma20 - 1.5 * atr
-
-    m30 = df_m30[['M30_RSI']].sort_index()
-    h1 = df_h1[['H1_Dist_MA200']].sort_index()
-    h4 = df_h4[['H4_Dist_MA50']].sort_index()
-
-    merged = pd.merge_asof(df.sort_index(), m30, left_index=True, right_index=True, direction='backward')
-    merged = pd.merge_asof(merged.sort_index(), h1, left_index=True, right_index=True, direction='backward')
-    merged = pd.merge_asof(merged.sort_index(), h4, left_index=True, right_index=True, direction='backward')
-
-    merged['hour'] = merged.index.hour
-    merged['dow'] = merged.index.dayofweek
-
-    # --- ⬇️ [อัปเดต v6.1] 19 Features ⬇️ ---
-    cols = ['high','low','close','tick_volume',
-            'ATR_14','Stoch_K','MACD_Hist','ADX_14',
-            'M30_RSI','H1_Dist_MA200','H4_Dist_MA50',
-            'ret_1','ret_5','ret_10','vol_rolling',
-            'hour','dow',
-            'k_upper','k_lower' # ⬅️ [ใหม่]
-            ]
+    # --- 1. Basic Momentum & Trend ---
+    # Log Returns
+    df['log_ret_1'] = np.log(df['close'] / df['close'].shift(1))
+    df['log_ret_5'] = np.log(df['close'] / df['close'].shift(5))
     
-    merged = merged[cols].copy()
+    # EMA 50 Dist (Trend M5)
+    ema50 = talib.EMA(close_p, timeperiod=50)
+    df['dist_ema50'] = (close_p - ema50) / close_p
     
-    merged.dropna(inplace=True)
-    merged.reset_index(inplace=True) # คืน 'time' กลับมาเป็นคอลัมน์
-    print(f"Features computed (v6.1 - 19f). Rows: {len(merged)}")
+    # H1 Trend Context (สร้าง H1 จาก M5)
+    # Resample 1H เพื่อดูเทรนด์ใหญ่
+    df_h1 = df.resample('1H').agg({'close': 'last'}).dropna()
+    df_h1['ema50_h1'] = talib.EMA(df_h1['close'].astype(float).values, timeperiod=50)
     
-    return merged
+    # Map H1 EMA กลับมาใส่ M5 (ffill = ใช้ค่าล่าสุดที่มีอยู่)
+    df['ema50_h1'] = df_h1['ema50_h1'].reindex(df.index, method='ffill')
+    df['dist_h1_ema'] = (df['close'] - df['ema50_h1']) / df['close']
+    
+    # --- 2. Candle Psychology (Price Action) ---
+    candle_range = (high_p - low_p) + 1e-9
+    body_size = np.abs(close_p - open_p)
+    upper_wick = high_p - np.maximum(close_p, open_p)
+    lower_wick = np.minimum(close_p, open_p) - low_p
+    
+    df['body_pct'] = body_size / candle_range
+    df['upper_wick_pct'] = upper_wick / candle_range
+    df['lower_wick_pct'] = lower_wick / candle_range
+    
+    # --- 3. Volume Force ---
+    vol_sma = talib.SMA(volume, timeperiod=20) + 1e-9
+    df['vol_force'] = (volume * np.sign(close_p - open_p)) / vol_sma
 
-# ==============================================================================
-# PART 2: SCALING
-# ==============================================================================
-def scale_features(train_df, test_df=None, scaler=None):
-    if scaler is None:
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        train_scaled = scaler.fit_transform(train_df)
+    # --- 4. Daily Pivots (Support/Resistance) ---
+    # Resample เป็นรายวัน (D)
+    # shift(1) สำคัญมาก! เพื่อใช้ราคาปิดเมื่อวานคำนวณ Pivot วันนี้
+    df_day = df.resample('D').agg({
+        'high': 'max', 'low': 'min', 'close': 'last'
+    }).shift(1).dropna()
+    
+    df_day['Pivot'] = (df_day['high'] + df_day['low'] + df_day['close']) / 3
+    df_day['R1'] = (2 * df_day['Pivot']) - df_day['low']
+    df_day['S1'] = (2 * df_day['Pivot']) - df_day['high']
+    
+    # Map กลับมาที่ M5
+    df['Pivot'] = df_day['Pivot'].reindex(df.index, method='ffill')
+    df['R1']    = df_day['R1'].reindex(df.index, method='ffill')
+    df['S1']    = df_day['S1'].reindex(df.index, method='ffill')
+    
+    # Calculate Distances
+    df['dist_pivot'] = (close_p - df['Pivot']) / close_p
+    df['dist_r1']    = (close_p - df['R1']) / close_p
+    df['dist_s1']    = (close_p - df['S1']) / close_p
+
+    # --- 5. Volatility & Time ---
+    df['atr_14'] = talib.ATR(high_p, low_p, close_p, timeperiod=14)
+    df['atr_pct'] = df['atr_14'] / close_p
+    df['rsi_14'] = talib.RSI(close_p, timeperiod=14)
+    
+    # Time Encoding
+    df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24.0)
+    df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24.0)
+
+    # --- 6. Intermarket Analysis (USD) ---
+    if df_usd is not None and not df_usd.empty:
+        # Align Data: บังคับให้ USD มาเกาะเวลาเดียวกับ Gold
+        usd_close = df_usd['close'].reindex(df.index, method='ffill').fillna(method='bfill')
+        
+        usd_vals = usd_close.astype(float).values
+        gold_vals = df['close'].astype(float).values
+        
+        # USD Momentum
+        df['usd_ret_5'] = np.log(usd_vals / (pd.Series(usd_vals).shift(5).values + 1e-9))
+        
+        # Correlation (12 bars window)
+        df['usd_corr'] = df['close'].rolling(12).corr(usd_close)
     else:
-        train_scaled = scaler.transform(train_df)
-    train_scaled_df = pd.DataFrame(train_scaled, columns=train_df.columns)
-    if test_df is not None:
-        test_scaled = scaler.transform(test_df)
-        test_scaled_df = pd.DataFrame(test_scaled, columns=test_df.columns)
-        return scaler, train_scaled_df, test_scaled_df
-    return scaler, train_scaled_df, None
+        # Fallback กรณีไม่มีข้อมูล USD
+        df['usd_ret_5'] = 0.0
+        df['usd_corr'] = -1.0 # สมมติว่าสวนทางปกติ
+
+    # --- Final Selection ---
+    # เลือกเฉพาะ Column ที่ต้องใช้
+    available_cols = [c for c in REQUIRED_FEATURES if c in df.columns]
+    
+    # ถ้ามี column ไหนหายไป ให้เติม 0 (Fail-safe)
+    for col in REQUIRED_FEATURES:
+        if col not in df.columns:
+            df[col] = 0.0
+            
+    df = df[REQUIRED_FEATURES].copy()
+    
+    # Clean NaN/Inf
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df.dropna(inplace=True)
+    
+    print(f"✅ Features computed (Lite). Rows: {len(df)}")
+    return df
+
+# ==============================================================================
+# PART 2: SCALING (RobustScaler)
+# ==============================================================================
+
+def scale_features(df_features, scaler):
+    """
+    Scale ข้อมูลโดยใช้ Scaler ที่โหลดมาจากไฟล์ Pickle (.pkl)
+    """
+    if scaler is None:
+        raise ValueError("Scaler is None. Cannot transform features.")
+    
+    # ตรวจสอบว่า Feature ครบไหม
+    if list(df_features.columns) != REQUIRED_FEATURES:
+        # พยายาม Reorder ให้ตรง
+        try:
+            df_features = df_features[REQUIRED_FEATURES]
+        except KeyError as e:
+             print(f"❌ Scaling Error: Missing columns {e}")
+             return None
+
+    # Transform
+    # Scaler ถูก Fit มาแบบ 2D (n_samples, n_features)
+    # เราส่ง DataFrame เข้าไป มันจะคืนค่าเป็น Numpy Array
+    try:
+        scaled_array = scaler.transform(df_features)
+        
+        # แปลงกลับเป็น DataFrame เพื่อความง่ายในการ Debug (Optional)
+        # หรือส่งกลับเป็น Array เลยก็ได้ แต่ API มักจะเอา Array ไปเข้า Model ต่อ
+        return scaled_array
+        
+    except Exception as e:
+        print(f"❌ Error during scaling: {e}")
+        return None

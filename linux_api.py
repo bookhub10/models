@@ -6,6 +6,14 @@ import json
 import traceback
 import numpy as np
 import pandas as pd
+import os
+import sys
+import inspect
+import pickle
+import json
+import traceback
+import numpy as np
+import pandas as pd
 import requests 
 from flask import Flask, request, jsonify
 from tensorflow.keras.models import load_model
@@ -18,6 +26,7 @@ import pytz
 from datetime import datetime, timedelta 
 from bs4 import BeautifulSoup 
 from playwright.sync_api import sync_playwright
+import talib
 
 # Suppress TensorFlow and other library warnings
 warnings.filterwarnings("ignore")
@@ -30,9 +39,10 @@ try:
     if root_dir not in sys.path:
         sys.path.append(root_dir)
     
-    from linux_model import add_technical_indicators, scale_features
+    # [v7.0] Import from linux_model.py
+    from deploy.linux_model import compute_features_lite, scale_features, REQUIRED_FEATURES
     
-    print("✅ External model functions (19 Features - v6.1) loaded successfully.")
+    print("✅ External model functions (18 Features - v7.0) loaded successfully.")
 except ImportError as e:
     print(f"❌ FATAL: Cannot import from linux_model.py. Error: {e}")
     sys.exit(1)
@@ -40,53 +50,48 @@ except Exception as e:
     print(f"❌ FATAL: An unexpected error occurred during import: {e}")
     sys.exit(1)
 
-# --- [v6] อัปเดต Configuration & Global State ---
+# --- Configuration ---
 
 class Config:
-    # ⬇️ [ใหม่] อัปเดต Path ทั้งหมด
-    V6_MODEL_PATH = 'models/v6_stable_backtest.h5'
-    TREND_MODEL_PATH = 'models/v6_trend_detector.h5'
-    SIDEWAY_MODEL_PATH = 'models/v6_sideway_model.h5'
-    SCALER_PATH = 'models/scaler_v6.pkl'
-    # ⬆️ [ใหม่]
-    
-    SEQUENCE_LENGTH = 120
-    PREDICTION_THRESHOLD = 0.45 
-    DB_PATH = 'obot_history.db'
+    # Path Config for LITE Model
+    MODEL_PATH = 'models/v7_model_m5.h5'
+    SCALER_PATH = 'models/v7_scaler_m5.pkl'
+
+    SEQUENCE_LENGTH = 50
+    PREDICTION_THRESHOLD = 0.75 
     NEWS_LOCKDOWN_MINUTES = 30
+    MIN_ATR = 1.0       # ใส่ค่าตาม run_lite
+    USE_EMA_FILTER = True
 
 app = Flask(__name__)
 
-# ⬇️ [ใหม่] เราต้องการ 3 โมเดล + 1 Scaler
-v6_model = None
-trend_model = None
-sideway_model = None
+# Global Variables
+lite_model = None
 scaler = None
 
-# --- [v6.1] รายชื่อคุณลักษณะ (19 Features) ---
 REQUIRED_FEATURES = [
-    'high', 'low', 'close', 'tick_volume',
-    'ATR_14', 'Stoch_K', 'MACD_Hist', 'ADX_14',
-    'M30_RSI', 'H1_Dist_MA200','H4_Dist_MA50',
-    'ret_1', 'ret_5', 'ret_10', 'vol_rolling',
-    'hour', 'dow',
-    'k_upper', 'k_lower'
+    'log_ret_1', 'log_ret_5', 'dist_ema50', 'dist_h1_ema',
+    'body_pct', 'upper_wick_pct', 'lower_wick_pct',
+    'vol_force',
+    'dist_pivot', 'dist_r1', 'dist_s1',
+    'atr_14', 'atr_pct', 'rsi_14',
+    'hour_sin', 'hour_cos',
+    'usd_ret_5', 'usd_corr'
 ]
 
 account_status = {
     'bot_status': 'STOPPED', 'balance': 0.0, 'equity': 0.0,
     'margin_free': 0.0, 'open_trades': 0, 'last_signal': 'NONE',
-    'last_regime': 'NONE' # ⬅️ [ใหม่]
+    'last_regime': 'ACTIVE' 
 }
 
 news_lockdown = {'active': False, 'message': 'News filter starting...'}
 news_lock = threading.Lock() 
 
-# --- 🛑 [v6] News Filter Functions (แก้ไขสำหรับ Playwright + FXVerify) ---
-
+# --- News Filter Functions (Playwright) ---
 def fetch_html_with_playwright(url):
     """
-    [v6 ใหม่] ใช้ Playwright เพื่อเปิดเว็บ, รอข้อมูลโหลด, แล้วคืนค่า HTML
+    ใช้ Playwright เพื่อเปิดเว็บ, รอข้อมูลโหลด, แล้วคืนค่า HTML
     """
     html_content = None
     try:
@@ -114,23 +119,20 @@ def fetch_html_with_playwright(url):
 
 def fetch_ff_news():
     """
-    [v6 อัปเดต] ดึงปฏิทินข่าวจาก FXVerify
-    (ใช้ Selectors ที่ถูกต้องจากไฟล์ HTML ที่คุณให้มา)
+    ดึงปฏิทินข่าวจาก FXVerify ด้วย Playwright
     """
     global news_lockdown
     
     url = "https://fxverify.com/tools/economic-calendar#popout" 
     
     try:
-        # 1. ⬅️ [v6 ใหม่] ใช้ Playwright ดึง HTML ที่โหลดแล้ว
+        # 1. ⬅️ ใช้ Playwright ดึง HTML ที่โหลดแล้ว
         html_text = fetch_html_with_playwright(url)
         
         if not html_text:
             raise Exception("Playwright failed to fetch HTML (content is None).")
 
         soup = BeautifulSoup(html_text, 'html.parser')
-        
-        # --- 🛑 [แก้ไข] ใช้ Selectors ที่ถูกต้อง ---
         
         # 2. ค้นหาตารางหลัก
         # (จาก HTML: <tbody id="eventDate_table_body">)
@@ -211,40 +213,29 @@ def fetch_ff_news():
         with news_lock:
             news_lockdown = {'active': False, 'message': 'Error fetching news.'}
 
-
 def run_news_scheduler():
-    """
-    (เหมือนเดิม) รัน fetch_ff_news() ทุก 1 ชั่วโมง
-    (ตอนนี้จะเรียกใช้เวอร์ชัน Playwright ที่แก้ไขแล้ว)
-    """
     fetch_ff_news() # (รันครั้งแรก)
     while True:
         time.sleep(3600) # (รอ 1 ชั่วโมง)
         fetch_ff_news()
 
-# --- Download Model & Scaler from GitHub --- 
+# --- Download Function (Placeholder URLs) ---
 def download_model_assets():
-    """Download model and scaler from GitHub."""
+    """
+    Download Lite model/scaler from GitHub.
+    """
     GITHUB_FILES = {
-        'v6_model': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v6_stable_backtest.h5', 
-            'filename': Config.V6_MODEL_PATH
-        },
-        'trend_model': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v6_trend_detector.h5', 
-            'filename': Config.TREND_MODEL_PATH
-        },
-        'sideway_model': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v6_sideway_model.h5', 
-            'filename': Config.SIDEWAY_MODEL_PATH
+        'lite_model': {
+            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v7_model_m5.h5', 
+            'filename': Config.MODEL_PATH
         },
         'scaler': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/scaler_v6.pkl', 
+            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v7_scaler_m5.pkl', 
             'filename': Config.SCALER_PATH
         }
     }
 
-    os.makedirs(os.path.dirname(Config.V6_MODEL_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(Config.MODEL_PATH), exist_ok=True)
 
     for file_info in GITHUB_FILES.values():
         url = file_info['url']
@@ -300,74 +291,15 @@ def download_python_files():
             success = False
     return success
 
-# --- [ Database Functions (ไม่เปลี่ยนแปลง) ] ---
-def init_db():
-    """สร้างตารางฐานข้อมูลถ้ายังไม่มี"""
-    print(f"Initializing database at {Config.DB_PATH}...")
-    try:
-        conn = sqlite3.connect(Config.DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS account_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            balance REAL, equity REAL, margin_free REAL, open_trades INTEGER
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS signal_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            signal TEXT, probability REAL, atr REAL, dynamic_risk REAL
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS trade_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            event_message TEXT
-        )
-        ''')
-        
-        conn.commit()
-        print("✅ Database tables initialized successfully.")
-    except Exception as e:
-        print(f"❌ FATAL: Failed to initialize database: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-def log_to_db(query, params=()):
-    """ฟังก์ชันช่วยสำหรับ INSERT ข้อมูลลง DB (ป้องกัน DB locked)"""
-    try:
-        conn = sqlite3.connect(Config.DB_PATH, timeout=10) 
-        cursor = conn.cursor()
-        cursor.execute(query, params)
-        conn.commit()
-    except Exception as e:
-        print(f"❌ DB Log Error: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-# --- [ใหม่] Asset Management (โหลด 3 โมเดล) ---
+# --- Asset Management ---
 
 def load_assets():
-    """Load the Keras H5 models and MinMaxScaler."""
-    global v6_model, trend_model, sideway_model, scaler
-    print("--- Attempting to load v6 Multi-Model System ---")
+    """Load the Single Lite Model and Scaler."""
+    global lite_model, scaler
+    print("--- Attempting to load LITE Model System ---")
     try:
-        v6_model = load_model(Config.V6_MODEL_PATH)
-        print(f"✅ Loaded Main Model: {Config.V6_MODEL_PATH}")
-        
-        trend_model = load_model(Config.TREND_MODEL_PATH)
-        print(f"✅ Loaded Trend Detector: {Config.TREND_MODEL_PATH}")
-        
-        sideway_model = load_model(Config.SIDEWAY_MODEL_PATH)
-        print(f"✅ Loaded Sideway Model: {Config.SIDEWAY_MODEL_PATH}")
+        lite_model = load_model(Config.MODEL_PATH)
+        print(f"✅ Loaded Lite Model: {Config.MODEL_PATH}")
         
         with open(Config.SCALER_PATH, 'rb') as f:
             scaler = pickle.load(f)
@@ -378,138 +310,130 @@ def load_assets():
             if scaler.n_features_in_ != len(REQUIRED_FEATURES):
                 print(f"⚠️ WARNING: Scaler/Config mismatch. Scaler needs {scaler.n_features_in_}, Config has {len(REQUIRED_FEATURES)}")
 
-        print("✅ All v6 assets loaded successfully.")
+        print("✅ All v7 assets loaded successfully.")
         return True
-        
     except FileNotFoundError as e:
         print(f"❌ Error: Model or Scaler file not found. {e}")
     except Exception as e:
         print(f"❌ Critical Error loading assets: {e}")
         traceback.print_exc()
-    
-    v6_model = None
-    trend_model = None
-    sideway_model = None
+
+    lite_model = None
     scaler = None
     return False
 
-# --- JSON Parsing Helper (ไม่เปลี่ยนแปลง) ---
+# --- JSON Parsing Helper ---
 def parse_mql_json(req):
-    """Helper to safely parse JSON from MQL5 (which might contain trailing NULs)."""
+    """Helper to safely parse JSON from MQL5."""
     if req.data:
         try:
             raw_data = req.data.decode('utf-8', errors='ignore').strip('\x00').strip()
             return json.loads(raw_data)
         except json.JSONDecodeError as e:
             print(f"❌ JSON Decode Error: {e}")
-            print(f"Raw data snippet (first 200 chars): {raw_data[:200]}")
             return None
     return None
 
-# --- [ใหม่] Core Prediction Logic (v6 Regime-Switching) ---
-
 def preprocess_and_predict(raw_data):
     """
-    v6 (แก้ไข): 
-    1. ใช้ Trend Detector ตัดสินใจ
-    2. ถ้า Trend -> ใช้ v6_model
-    3. ถ้า Sideway -> ใช้ sideway_model
+    Lite Logic:
+    1. Parse M5 & USD
+    2. Compute 18 Features
+    3. Scale & Predict (Single Model)
     """
-    global v6_model, trend_model, sideway_model, scaler
+    global lite_model, scaler
     
-    # ... (ส่วนการ Parse MQL JSON เหมือนเดิม) ...
     try:
+        # 1. Parse Data
         df_m5 = pd.DataFrame(raw_data['m5_data'])
-        df_m30 = pd.DataFrame(raw_data['m30_data'])
-        df_h1 = pd.DataFrame(raw_data['h1_data'])
-        df_h4 = pd.DataFrame(raw_data['h4_data'])
         
-        if df_m5.empty or df_m30.empty or df_h1.empty or df_h4.empty:
-            raise ValueError(f"One or more timeframes returned empty data.")
+        # USD Data Handling (Fail-safe)
+        usd_raw = raw_data.get('usd_m5', [])
+        df_usd = pd.DataFrame(usd_raw) if usd_raw else None
+        
+        if df_m5.empty: raise ValueError("Empty XAUUSD data")
 
-        df_m5['time'] = pd.to_datetime(df_m5['time'], unit='s'); df_m5.set_index('time', inplace=True)
-        df_m30['time'] = pd.to_datetime(df_m30['time'], unit='s'); df_m30.set_index('time', inplace=True); df_m30 = df_m30[['close']] 
-        df_h1['time'] = pd.to_datetime(df_h1['time'], unit='s'); df_h1.set_index('time', inplace=True); df_h1 = df_h1[['close']] 
-        df_h4['time'] = pd.to_datetime(df_h4['time'], unit='s'); df_h4.set_index('time', inplace=True); df_h4 = df_h4[['close']]
+        # Convert Time
+        df_m5['time'] = pd.to_datetime(df_m5['time'], unit='s')
+        df_m5.set_index('time', inplace=True)
+        
+        if df_usd is not None and not df_usd.empty:
+            df_usd['time'] = pd.to_datetime(df_usd['time'], unit='s')
+            df_usd.set_index('time', inplace=True)
+
+        # 2. Compute Features (ใช้ฟังก์ชันจาก linux_model_lite)
+        df_features = compute_features_lite(df_m5, df_usd=df_usd)
+        
+        # Check Length
+        if len(df_features) < Config.SEQUENCE_LENGTH:
+            raise ValueError(f"Not enough data: {len(df_features)}/{Config.SEQUENCE_LENGTH}")
+            
+        # 3. Prepare for Scaling
+        # เลือกข้อมูลล่าสุดเท่ากับ Seq Length
+        df_input = df_features.iloc[-Config.SEQUENCE_LENGTH:].copy()
+        
+        latest_atr = df_input['atr_14'].iloc[-1]
+
+        # Feature Validation
+        final_features = [col for col in REQUIRED_FEATURES if col in df_input.columns]
+        if len(final_features) != len(REQUIRED_FEATURES):
+            missing = set(REQUIRED_FEATURES) - set(final_features)
+            # Fallback: ถ้าขาด Feature ใหม่ (เช่น USD ไม่มีข้อมูล) ให้เติม 0 เพื่อไม่ให้ระบบล่ม
+            print(f"⚠️ Warning: Missing features {missing}. Filling with 0.")
+            for col in missing:
+                df_input[col] = 0.0
+            df_input = df_input[REQUIRED_FEATURES] # Reorder
+        
+        # Scale (ใช้ฟังก์ชันจาก linux_model)
+        X_scaled = scale_features(df_input, scaler)
+        
+        if X_scaled is None: raise ValueError("Scaling returned None")
+        
+        # Reshape for LSTM (1, 50, 18)
+        X_pred = np.array([X_scaled])
+
+        # 4. Predict
+        probs = lite_model.predict(X_pred, verbose=0)[0]
+        cls = np.argmax(probs)
+        probability = np.max(probs)
+        
+        signal = 'NONE'
+        if cls == 1: signal = 'BUY'
+        elif cls == 2: signal = 'SELL'
+        elif cls == 0: signal = 'HOLD'
+        
+        # A. ดึงราคาปัจจุบัน
+        current_close = df_m5['close'].iloc[-1]
+        
+        # B. คำนวณ EMA 200 (ใช้ TA-Lib)
+        # ต้องคำนวณจากข้อมูล M5 ที่ส่งมา
+        real_close = df_m5['close'].astype(float).values
+        ema200 = talib.EMA(real_close, timeperiod=200)[-1] # เอาค่าล่าสุด
+        
+        # C. กรอง Trend (EMA 200 Filter)
+        if Config.USE_EMA_FILTER and not np.isnan(ema200):
+            if signal == 'BUY' and current_close < ema200:
+                print(f"filter: Blocked BUY (Price {current_close:.2f} < EMA {ema200:.2f})")
+                signal = 'HOLD' # เปลี่ยนเป็น Hold
+            elif signal == 'SELL' and current_close > ema200:
+                print(f"filter: Blocked SELL (Price {current_close:.2f} > EMA {ema200:.2f})")
+                signal = 'HOLD'
+
+        # D. กรอง Min ATR
+        if latest_atr < Config.MIN_ATR:
+            print(f"filter: Low Volatility (ATR {latest_atr:.4f} < {Config.MIN_ATR})")
+            signal = 'HOLD'
+
+        return signal, probability, latest_atr, "ACTIVE"
 
     except Exception as e:
-        raise ValueError(f"Failed to parse Multi-Timeframe data. Error: {e}")
-
-    # 1. คำนวณ 19 ฟีเจอร์ (จาก linux_model_11.py)
-    df_features = add_technical_indicators(
-        df_m5, df_m30, df_h1, 
-        df_h4
-    )
+        raise ValueError(f"Preprocessing Error: {e}")
     
-    if len(df_features) < Config.SEQUENCE_LENGTH:
-        raise ValueError(f"Not enough valid bars ({len(df_features)}), expected {Config.SEQUENCE_LENGTH}.")
-    
-    latest_atr = df_features['ATR_14'].iloc[-1]
-    df_for_scaling = df_features.iloc[-Config.SEQUENCE_LENGTH:].copy() 
-    
-    # 2. ตรวจสอบ 19 ฟีเจอร์
-    final_features = [col for col in REQUIRED_FEATURES if col in df_for_scaling.columns]
-    if len(final_features) != len(REQUIRED_FEATURES):
-        missing = set(REQUIRED_FEATURES) - set(final_features)
-        raise ValueError(f"Feature Mismatch: Expected {len(REQUIRED_FEATURES)} features (v6). Missing: {missing}")
-    
-    df_for_scaling_trimmed = df_for_scaling[final_features]
-    
-    # 3. Scale ข้อมูล
-    try:
-        _, test_scaled, _ = scale_features(
-            df_for_scaling_trimmed, test_df=None, scaler=scaler 
-        )
-    except Exception as e:
-        raise ValueError(f"Scaling failed (check feature count: {len(df_for_scaling_trimmed.columns)}). Error: {e}")
-
-    X_pred_data = test_scaled.values 
-    X_pred = np.array([X_pred_data]) 
-    
-    # --- 4. 🧠 ตรรกะ Regime-Switching ---
-    
-    # 4.1 รัน Trend Detector (โมเดล Gatekeeper)
-    # (Trend Detector เป็น binary sigmoid )
-    trend_prob = trend_model.predict(X_pred, verbose=0)[0][0] 
-    print(f"DEBUG: Trend Probability: {trend_prob:.4f}")
-    signal = 'NONE'
-    probability = 0.0
-    regime = 'NONE'
-
-    if trend_prob >= 0.50:
-        # 4.2 ตลาดเป็น Trend -> ใช้ v6 (Trend-Following)
-        regime = "TREND"
-        prediction_array = v6_model.predict(X_pred, verbose=0)[0]
-        predicted_class = np.argmax(prediction_array)
-        probability = np.max(prediction_array)
-        
-        if predicted_class == 1: signal = 'BUY'
-        elif predicted_class == 2: signal = 'SELL'
-        elif predicted_class == 0: signal = 'HOLD'
-        
-    else:
-        # 4.3 ตลาดเป็น Sideway -> ใช้ Sideway (Reversion)
-        regime = "SIDEWAY"
-        prediction_array = sideway_model.predict(X_pred, verbose=0)[0]
-        predicted_class = np.argmax(prediction_array)
-        probability = np.max(prediction_array)
-        
-        # (อ้างอิงจาก label_sideway_reversion )
-        if predicted_class == 1: signal = 'BUY' # (Reversion Long)
-        elif predicted_class == 2: signal = 'SELL' # (Reversion Short)
-        elif predicted_class == 0: signal = 'HOLD'
-
-    account_status['last_signal'] = signal
-    account_status['last_regime'] = regime # ⬅️ [ใหม่]
-    
-    # คืนค่า regime กลับไปด้วย
-    return signal, probability, latest_atr, regime
-
-# --- [ v6 Dynamic Risk Manager (ต้องปรับค่า) ] ---
+# --- [Dynamic Risk Manager] ---
 def calculate_dynamic_risk(probability):
-    if probability > 0.85: # ⬅️ (ต้องปรับใหม่)
+    if probability > 0.90: # ⬅️ (ต้องปรับใหม่)
         return 2.0  
-    elif probability > 0.65: # ⬅️ (ต้องปรับใหม่)
+    elif probability > 0.85: # ⬅️ (ต้องปรับใหม่)
         return 1.5  
     elif probability > Config.PREDICTION_THRESHOLD: 
         return 1.0  
@@ -520,27 +444,17 @@ def calculate_dynamic_risk(probability):
 
 @app.route('/status', methods=['GET']) 
 def get_status():
-    """Endpoint for MT5 EA to check the bot's current status and performance."""
-    global account_status, v6_model, trend_model, sideway_model, scaler # ⬅️ อัปเดตตัวแปร
-    try:
-        current_status = account_status.copy()
-        
-        # ⬇️ [ใหม่] รายงานสถานะของทุกโมเดล
-        current_status['v6_model_loaded'] = (v6_model is not None)
-        current_status['trend_model_loaded'] = (trend_model is not None)
-        current_status['sideway_model_loaded'] = (sideway_model is not None)
-        current_status['scaler_loaded'] = (scaler is not None)
-        
-        with news_lock:
-            current_status['news_status'] = news_lockdown['message']
+    global account_status, lite_model, scaler
 
-        return jsonify(current_status), 200
-    except Exception as e:
-        print(f"❌ Error fetching status: {e}")
-        return jsonify({'bot_status': 'ERROR', 'message': f'Server internal error: {str(e)}'}), 500
+    current = account_status.copy()
+    current['model_loaded'] = (lite_model is not None)
+    current['scaler_loaded'] = (scaler is not None)
+    with news_lock: current['news_status'] = news_lockdown['message']
+    return jsonify(current), 200
 
 @app.route('/predict', methods=['POST']) 
 def predict_signal():
+    # 1. News Check
     with news_lock:
         if news_lockdown['active']:
             return jsonify({
@@ -548,84 +462,55 @@ def predict_signal():
                 'dynamic_risk': 0.0, 'regime': 'NEWS_LOCKDOWN', 'message': news_lockdown['message']
             }), 200
 
-    if v6_model is None or trend_model is None or sideway_model is None or scaler is None:
-        return jsonify({'signal': 'ERROR', 'probability': 0.0, 'message': 'One or more models not loaded.'}), 503
+    # 2. Bot Status Check
+    if lite_model is None: return jsonify({'signal': 'ERROR', 'message': 'Model not loaded'}), 503
     if account_status['bot_status'] != 'RUNNING':
-        return jsonify({'signal': 'NONE', 'probability': 0.0, 'message': f"Bot is {account_status['bot_status']}."}), 200
+        return jsonify({'signal': 'NONE', 'message': 'Bot STOPPED'}), 200
 
+    # 3. Process
     try:
         data = parse_mql_json(request)
-        if data is None:
-            return jsonify({'signal': 'ERROR', 'probability': 0.0, 'message': 'Invalid JSON data received.'}), 400
+        if not data: return jsonify({'signal': 'ERROR', 'probability': 0.0, 'message': 'Invalid JSON data received.'}), 400
         
-        # ⬇️ [ใหม่] รับ regime กลับมาด้วย
-        signal, probability, atr, regime = preprocess_and_predict(data)
+        signal, prob, atr, regime = preprocess_and_predict(data)
         
+        # Threshold Check
         dynamic_risk_pct = 0.5 
 
-        if probability < Config.PREDICTION_THRESHOLD: 
+        if prob < Config.PREDICTION_THRESHOLD: 
             signal = 'HOLD' 
         else:
-            dynamic_risk_pct = calculate_dynamic_risk(probability)
-
-        log_query = "INSERT INTO signal_history (signal, probability, atr, dynamic_risk) VALUES (?, ?, ?, ?)"
-        log_params = (signal, probability, atr, dynamic_risk_pct) 
-        log_to_db(log_query, log_params)
+            dynamic_risk_pct = calculate_dynamic_risk(prob)
         
         return jsonify({
-            'signal': signal, 
-            'probability': float(probability),
+            'signal': signal,
+            'probability': float(prob),
             'atr': float(atr),
             'dynamic_risk': float(dynamic_risk_pct),
-            'regime': regime, # ⬅️ [ใหม่]
+            'regime': regime,
             'message': 'Prediction successful.'
         }), 200
         
-    except ValueError as ve:
-        print(f"❌ Prediction validation error: {ve}")
-        return jsonify({'signal': 'ERROR', 'probability': 0.0, 'message': str(ve)}), 400
     except Exception as e:
-        print(f"❌ CRITICAL ERROR in /predict: {e}")
+        print(f"❌ Predict Error: {e}")
         traceback.print_exc()
-        return jsonify({'signal': 'ERROR', 'probability': 0.0, 'message': 'Internal Server Error.'}), 500
+        return jsonify({'signal': 'ERROR', 'message': str(e)}), 500
 
-# --- [ /update_status Endpoint (ไม่เปลี่ยนแปลง) ] ---
-@app.route('/update_status', methods=['POST']) 
+@app.route('/update_status', methods=['POST'])
 def update_status():
-    """Endpoint for MT5 to send updated account status and trade alerts."""
     try:
         data = parse_mql_json(request)
-        
-        if data is None:
-             return jsonify({'status': 'ERROR', 'message': 'Invalid JSON data received.'}), 400
-             
-        balance = data.get('balance', 0.0)
-        equity = data.get('equity', 0.0)
-        margin_free = data.get('margin_free', 0.0)
-        open_trades = data.get('open_trades', 0)
-        
-        account_status.update({
-            'balance': balance, 'equity': equity,
-            'margin_free': margin_free, 'open_trades': open_trades,
-        })
-
-        log_query_ac = "INSERT INTO account_history (balance, equity, margin_free, open_trades) VALUES (?, ?, ?, ?)"
-        log_params_ac = (balance, equity, margin_free, open_trades)
-        log_to_db(log_query_ac, log_params_ac)
-
-        alert_message = data.get('alert_message')
-        if alert_message and alert_message.strip() != '': 
-            print(f"🚨 MQL ALERT: {alert_message}")
-            log_query_alert = "INSERT INTO trade_log (event_message) VALUES (?)"
-            log_to_db(log_query_alert, (alert_message,))
+        if data:
+            account_status.update({
+                'balance': data.get('balance', 0),
+                'equity': data.get('equity', 0),
+                'margin_free': data.get('margin_free', 0),
+                'open_trades': data.get('open_trades', 0)
+            })
 
         return jsonify({'status': 'SUCCESS'})
-    except Exception as e:
-        print(f"❌ update_status exception: {e}")
-        traceback.print_exc()
-        return jsonify({'status': 'ERROR', 'message': str(e)}), 500
+    except: return jsonify({'status': 'ERROR'}), 500
 
-# --- [ /command Endpoint (ไม่เปลี่ยนแปลง) ] ---
 @app.route('/command', methods=['POST'])
 def execute_command():
     """Endpoint for Telegram Bot or external system to send START/STOP commands."""
@@ -646,7 +531,6 @@ def execute_command():
     except Exception as e:
         return jsonify({'status': 'ERROR', 'message': str(e)}), 500
 
-# --- [ /retrain Endpoint (ไม่เปลี่ยนแปลง) ] ---
 @app.route('/retrain', methods=['POST'])
 def retrain_model_async():
     if account_status['bot_status'] != 'STOPPED':
@@ -655,16 +539,15 @@ def retrain_model_async():
     try:
         download_model_assets() 
         if load_assets():
-            return jsonify({'status': 'SUCCESS', 'message': '✅ Retraining completed and model (v6) loaded.'}), 200
+            return jsonify({'status': 'SUCCESS', 'message': '✅ Retraining completed and model (v7) loaded.'}), 200
         else:
-            return jsonify({'status': 'FAIL', 'message': '⚠️ Model (v6) or scaler could not be loaded after download.'}), 500
+            return jsonify({'status': 'FAIL', 'message': '⚠️ Model (v7) or scaler could not be loaded after download.'}), 500
 
     except Exception as e:
         print(f"❌ Error in retrain_model_async: {e}")
         traceback.print_exc()
         return jsonify({'status': 'FAIL', 'message': f'Error during retraining: {str(e)}'}), 500
 
-# --- [ /update_ea Endpoint (ไม่เปลี่ยนแปลง) ] ---
 @app.route('/update_ea', methods=['POST'])
 def update_expert_advisor():
     """
@@ -695,8 +578,7 @@ def update_expert_advisor():
         print(f"❌ Error in /update_ea: {e}")
         traceback.print_exc()
         return jsonify({'status': 'FAIL', 'message': f'Error during EA update: {str(e)}'}), 500
-
-# --- [ /restart Endpoint (ไม่เปลี่ยนแปลง) ] ---
+    
 @app.route('/restart', methods=['POST'])
 def restart_service():
     """Endpoint to restart the service via systemd."""
@@ -714,7 +596,6 @@ def restart_service():
         print(f"❌ Error in /restart: {e}")
         return jsonify({'status': 'FAIL', 'message': str(e)}), 500
 
-# --- [ /fix Endpoint (ไม่เปลี่ยนแปลง) ] ---
 @app.route('/fix', methods=['POST'])
 def fix_system_files():
     """Downloads updated Python scripts and reloads model assets."""
@@ -727,22 +608,20 @@ def fix_system_files():
         
     assets_loaded = load_assets()
     
-    message = "✅ System files and assets (v6) updated successfully."
+    message = "✅ System files and assets (v7) updated successfully."
     
     if not python_downloaded:
-        message = "⚠️ Python files update failed for one or more files. Assets (v6) reloaded."
+        message = "⚠️ Python files update failed for one or more files. Assets (v7) reloaded."
 
     if not assets_loaded:
-        return jsonify({'status': 'FAIL', 'message': '⚠️ Assets (v6) downloaded but failed to load. System files updated. **Please manually restart.**'}), 500
+        return jsonify({'status': 'FAIL', 'message': '⚠️ Assets (v7) downloaded but failed to load. System files updated. **Please manually restart.**'}), 500
 
     return jsonify({
         'status': 'SUCCESS', 
         'message': f'{message} **Requires Server Restart** for new Python files to take effect.'
     }), 200
 
-# --- Server Run ---
 if __name__ == '__main__':
-    init_db() 
     if load_assets():
         print("Starting background news scheduler (Playwright + FXVerify Scraper)...") # ⬅️ [แก้ไข]
         scheduler_thread = threading.Thread(target=run_news_scheduler, daemon=True)
@@ -751,5 +630,4 @@ if __name__ == '__main__':
         print("💡 NOTE: Remember to start the separate telegram_bot.py script.")
         app.run(host='0.0.0.0', port=5000)
     else:
-
-        print("❌ FATAL: Could not load v6 model/scaler. API not starting.")
+        print("❌ FATAL: Could not load v7 model/scaler. API not starting.")

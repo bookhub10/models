@@ -78,12 +78,8 @@ async def status_command(update, context):
         if response.status_code == 200:
             status_data = response.json()
             news_status = status_data.get('news_status', 'Unknown')
-            # ⬇️ [ใหม่] อ่านสถานะโมเดล (ปรับแต่งจาก API)
-            v6_loaded = status_data.get('v6_model_loaded', False)
-            trend_loaded = status_data.get('trend_model_loaded', False)
-            sideway_loaded = status_data.get('sideway_model_loaded', False)
-            models_ok = "✅" if (v6_loaded and trend_loaded and sideway_loaded) else "❌"
-            
+            model_loaded = status_data.get('model_loaded', False)
+            models_ok = "✅ Ready" if model_loaded else "❌ Not Loaded"
             message = (
                 f"📊 **OBOT STATUS REPORT** 📊\n"
                 f"------------------------------------\n"
