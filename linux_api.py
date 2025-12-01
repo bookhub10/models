@@ -54,8 +54,8 @@ except Exception as e:
 
 class Config:
     # Path Config for LITE Model
-    MODEL_PATH = 'models/model_m5.h5'
-    SCALER_PATH = 'models/scaler_m5.pkl'
+    MODEL_PATH = 'models/model.h5'
+    SCALER_PATH = 'models/scaler.pkl'
 
     SEQUENCE_LENGTH = 50
     PREDICTION_THRESHOLD = 0.75 
@@ -630,4 +630,5 @@ if __name__ == '__main__':
         print("💡 NOTE: Remember to start the separate telegram_bot.py script.")
         app.run(host='0.0.0.0', port=5000)
     else:
+
         print("❌ FATAL: Could not load v7 model/scaler. API not starting.")
