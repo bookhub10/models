@@ -54,8 +54,8 @@ except Exception as e:
 
 class Config:
     # Path Config for LITE Model
-    MODEL_PATH = 'models/v7_model_m5.h5'
-    SCALER_PATH = 'models/v7_scaler_m5.pkl'
+    MODEL_PATH = 'models/model_m5.h5'
+    SCALER_PATH = 'models/scaler_m5.pkl'
 
     SEQUENCE_LENGTH = 50
     PREDICTION_THRESHOLD = 0.75 
@@ -226,11 +226,11 @@ def download_model_assets():
     """
     GITHUB_FILES = {
         'lite_model': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v7_model_m5.h5', 
+            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/model.h5', 
             'filename': Config.MODEL_PATH
         },
         'scaler': {
-            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/v7_scaler_m5.pkl', 
+            'url': 'https://raw.githubusercontent.com/bookhub10/models/main/models/scaler.pkl', 
             'filename': Config.SCALER_PATH
         }
     }
