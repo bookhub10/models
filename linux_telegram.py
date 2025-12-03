@@ -81,7 +81,7 @@ async def status_command(update, context):
             model_loaded = status_data.get('model_loaded', False)
             models_ok = "✅ Ready" if model_loaded else "❌ Not Loaded"
             message = (
-                f"📊 **OBOT STATUS REPORT** 📊\n"
+                f"📊 **OBOT(V7) STATUS REPORT** 📊\n"
                 f"------------------------------------\n"
                 f"**Bot State:** `{status_data.get('bot_status')}`\n"
                 f"**Last Regime:** `{status_data.get('last_regime', 'N/A')}`\n" # ⬅️ [ใหม่]

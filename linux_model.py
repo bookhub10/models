@@ -17,7 +17,7 @@ REQUIRED_FEATURES = [
 ]
 
 # ==============================================================================
-# PART 1: FEATURE ENGINEERING (Lite + 62b Hybrid)
+# PART 1: FEATURE ENGINEERING
 # ==============================================================================
 
 def compute_features_lite(df_m5, df_usd=None):

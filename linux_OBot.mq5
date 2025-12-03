@@ -1,17 +1,17 @@
 //+------------------------------------------------------------------+
-//|                        OBotTrading_v6.2.mq5                      |
+//|                        OBotTrading_v7.0.mq5                      |
 //+------------------------------------------------------------------+
 #property copyright "OakJkpG OBot Project"
-#property version   "7.00" 
-#property description "RNN(GRU) v7.0"
+#property version   "7.01" 
+#property description "RNN(LSTM -> CNN) v7.0"
 
-// --- Inputs (v6.2) ---
+// --- Inputs ---
 input string APIServerURL = "http://127.0.0.1:5000";
-input int    LookbackBars = 3100; // (ใช้ 120 แท่งฝั่ง api)
+input int    LookbackBars = 1000; // (ใช้ 120 แท่งฝั่ง api)
 input int    MagicNumber  = 12345;
 input double MaxLotSize  = 1.0;
-input double ProbThreshold = 0.6; 
-input double MinATR        = 0.5;
+input double ProbThreshold = 0.45; 
+input double MinATR        = 1.0;
 input int    MinTradeIntervalMins = 1;
 input double SL_Multiplier = 1.0;
 input double TP_Multiplier = 1.5;
@@ -24,13 +24,13 @@ input int    MaxHoldBars = 12;
 
 // --- Time Filter Inputs ---
 input bool   UseTimeFilter  = true;     // เปิดใช้งาน Filter
-input int    TradeStartHour = 8;        // เริ่มเทรด 8 โมง (Broker Time)
-input int    TradeEndHour   = 20;       // จบเทรด 20 โมง (Broker Time)  
+input int    TradeStartHour = 7;        // เริ่มเทรด 8 โมง (Broker Time)
+input int    TradeEndHour   = 21;       // จบเทรด 20 โมง (Broker Time)  
 
 // --- Cooldown Filter ---
-input int    TradeCooldownBars = 3; 
+input int    TradeCooldownBars = 2; 
 
-// --- [v6.2] Intermarket Analysis Inputs ---
+// --- Intermarket Analysis Inputs ---
 input string IntermarketSymbol = "UsDollar"; // ชื่อ Symbol ดอลลาร์ (ต้องตรงกับใน MT5)
 
 // --- Fail-Safe Inputs (Circuit Breaker) ---
@@ -137,7 +137,7 @@ void OnTick()
             }
         }
         
-        // --- [v6.2] ส่งข้อมูล Multi-Asset ---
+        // --- ส่งข้อมูล Multi-Asset ---
         int requestBars = LookbackBars;
         string data_json = GetMultiAssetDataJSON(requestBars);
         string ml_signal = GetSignalFromAPI(data_json);
@@ -148,7 +148,7 @@ void OnTick()
         int secondsSinceLast = (int)(now - LastSignalTime);
         if (secondsSinceLast < MinTradeIntervalMins * 60 && ml_signal != LastSignal) ml_signal = "HOLD";
         
-        Print(StringFormat("OBot v6.2 (Intermarket): Signal=%s (Prob:%.2f), Cooldown: %d/%d", 
+        Print(StringFormat("OBot v7.0: Signal=%s (Prob:%.2f), Cooldown: %d/%d", 
                 ml_signal, LastProbability, BarsSinceLastClose, TradeCooldownBars));
         
         if (PositionSelect(_Symbol))
@@ -250,7 +250,7 @@ string GetRatesJSON(string symbol, ENUM_TIMEFRAMES timeframe, int bars)
     return json_array;
 }
 
-// 🛑 [v6.2] (ฟังก์ชันที่ 2) - ส่ง Multi-Asset (XAU + USD) 🛑
+// 🛑 (ฟังก์ชันที่ 2) - ส่ง Multi-Asset (XAU + USD) 🛑
 string GetMultiAssetDataJSON(int m5_bars)
 {
     // 1. XAUUSD Data (M5 Only)
@@ -366,11 +366,11 @@ void ExecuteTrade(string signal, double atr_value)
 
     if (signal == "BUY") {
         request.type = ORDER_TYPE_BUY;
-        request.comment = "RNN_v6.2_BUY";
+        request.comment = "RNN_v7.0_BUY";
         request.price = tick.ask;
     } else if (signal == "SELL") {
         request.type = ORDER_TYPE_SELL;
-        request.comment = "RNN_v6.2_SELL";
+        request.comment = "RNN_v7.0_SELL";
         request.price = tick.bid;
     } else return;
 
@@ -667,13 +667,13 @@ void ClosePositionByConflict()
     {
         request.type = ORDER_TYPE_SELL;
         request.price = tick.bid;
-        request.comment = "RNN_v6_Conflict_CloseBUY"; // [v6]
+        request.comment = "RNN_v7.0_Conflict_CloseBUY"; // [v7]
     }
     else // ปิด SELL
     {
         request.type = ORDER_TYPE_BUY;
         request.price = tick.ask;
-        request.comment = "RNN_v6_Conflict_CloseSELL"; // [v6]
+        request.comment = "RNN_v7.0_Conflict_CloseSELL"; // [v7]
     }
 
     if (OrderSend(request, result))

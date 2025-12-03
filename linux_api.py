@@ -40,7 +40,7 @@ try:
         sys.path.append(root_dir)
     
     # [v7.0] Import from linux_model.py
-    from deploy.linux_model import compute_features_lite, scale_features, REQUIRED_FEATURES
+    from linux_model import compute_features_lite, scale_features, REQUIRED_FEATURES
     
     print("✅ External model functions (18 Features - v7.0) loaded successfully.")
 except ImportError as e:
@@ -58,7 +58,7 @@ class Config:
     SCALER_PATH = 'models/scaler.pkl'
 
     SEQUENCE_LENGTH = 50
-    PREDICTION_THRESHOLD = 0.75 
+    PREDICTION_THRESHOLD = 0.45 
     NEWS_LOCKDOWN_MINUTES = 30
     MIN_ATR = 1.0       # ใส่ค่าตาม run_lite
     USE_EMA_FILTER = True
@@ -82,7 +82,7 @@ REQUIRED_FEATURES = [
 account_status = {
     'bot_status': 'STOPPED', 'balance': 0.0, 'equity': 0.0,
     'margin_free': 0.0, 'open_trades': 0, 'last_signal': 'NONE',
-    'last_regime': 'ACTIVE' 
+    'last_regime': 'V7.01' 
 }
 
 news_lockdown = {'active': False, 'message': 'News filter starting...'}
@@ -431,9 +431,9 @@ def preprocess_and_predict(raw_data):
     
 # --- [Dynamic Risk Manager] ---
 def calculate_dynamic_risk(probability):
-    if probability > 0.90: # ⬅️ (ต้องปรับใหม่)
+    if probability > 0.85: # ⬅️ (ต้องปรับใหม่)
         return 2.0  
-    elif probability > 0.85: # ⬅️ (ต้องปรับใหม่)
+    elif probability > 0.65: # ⬅️ (ต้องปรับใหม่)
         return 1.5  
     elif probability > Config.PREDICTION_THRESHOLD: 
         return 1.0  
@@ -630,5 +630,4 @@ if __name__ == '__main__':
         print("💡 NOTE: Remember to start the separate telegram_bot.py script.")
         app.run(host='0.0.0.0', port=5000)
     else:
-
         print("❌ FATAL: Could not load v7 model/scaler. API not starting.")
