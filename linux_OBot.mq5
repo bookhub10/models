@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
-//|                        OBotTrading_v7.0.mq5                      |
+//|                        OBotTrading_v7.1.mq5                      |
 //+------------------------------------------------------------------+
 #property copyright "OakJkpG OBot Project"
-#property version   "7.01" 
-#property description "RNN(LSTM -> CNN) v7.0"
+#property version   "7.1" 
+#property description "RNN(CNN) v7.1"
 
 // --- Inputs ---
 input string APIServerURL = "http://127.0.0.1:5000";
@@ -16,10 +16,11 @@ input int    MinTradeIntervalMins = 1;
 input double SL_Multiplier = 1.0;
 input double TP_Multiplier = 1.5;
 
-// --- Trailing Stop Inputs ---
-input bool   UseTrailingStop = true;
-input double TrailingStart_ATR_Mult = 1.4;
-input double TrailingDist_ATR_Mult = 0.9; 
+// --- Trailing Stop Inputs (Updated) ---
+input bool   UseTrailingStop       = true;
+input double TrailingStart_ATR_Mult = 1.3;  // กำไรเท่านี้เริ่มทำงาน (Start)
+input double TrailingDist_ATR_Mult  = 1.0;  // รักษาระยะห่างเท่านี้ (Distance)
+input double TrailingStep_ATR_Mult  = 0.1;  // [NEW] ต้องขยับอย่างน้อย 0.1 ATR ถึงจะแก้ SL (ลด Spam)
 input int    MaxHoldBars = 12;
 
 // --- Time Filter Inputs ---
@@ -28,7 +29,7 @@ input int    TradeStartHour = 7;        // เริ่มเทรด 8 โม�
 input int    TradeEndHour   = 21;       // จบเทรด 20 โมง (Broker Time)  
 
 // --- Cooldown Filter ---
-input int    TradeCooldownBars = 2; 
+input int    TradeCooldownBars = 3; 
 
 // --- Intermarket Analysis Inputs ---
 input string IntermarketSymbol = "UsDollar"; // ชื่อ Symbol ดอลลาร์ (ต้องตรงกับใน MT5)
@@ -36,6 +37,26 @@ input string IntermarketSymbol = "UsDollar"; // ชื่อ Symbol ดอลล
 // --- Fail-Safe Inputs (Circuit Breaker) ---
 input int    MaxConsecutiveLosses = 3; // ขาดทุนติดกันได้สูงสุดกี่ครั้ง
 input int    PenaltyPauseHours    = 1; // ถ้าครบกำหนด ให้หยุดพักกี่ชั่วโมง
+
+// --- [NEW] Risk Management Inputs ---
+input double MaxDailyLossPercent = 50.0;   // ตัดขาดทุนรายวันเมื่อ Equity ลดลง 50% จากต้นวัน
+input int    MaxSpreadPoints     = 35;    // ไม่เข้าเทรดถ้า Spread เกิน 35 จุด (กันสเปรดถ่าง)
+
+// --- [NEW] Profit Taking Inputs ---
+input bool   UsePartialClose     = true;  // เปิดใช้ระบบแบ่งปิดกำไร
+input double PartialClose_Pct    = 25.0;  // แบ่งปิดเมื่อกำไรถึง 50% ของระยะ TP
+input double PartialClose_Vol    = 50.0;  // ปิดออกกี่ % ของ Lot (เช่น 50% คือปิดครึ่งนึง)
+
+// --- [NEW] Smart Entry Inputs ---
+input bool   UseLimitOrder       = true;  // ใช้ Limit Order แทน Market (เพื่อราคาที่ดีกว่า)
+input int    LimitDistancePoints = 0;     // ตั้งรอที่ราคาปัจจุบัน (0) หรือต่อราคา (เช่น 50 จุด)
+input int    LimitExpirationMins = 10;    // ยกเลิก Limit Order ถ้าไม่ได้ของใน 10 นาที
+
+// --- [NEW] Runner Strategy Inputs ---
+input bool   UseRunnerStrategy   = true;  // เปิดโหมดปล่อยไหล
+input double FirstTarget_ATR     = 1.5;   // เป้าแรก (Virtual TP) ที่จะเก็บกำไรก้อนใหญ่ (ค่าเดิมของคุณ)
+input double CloseVolume_Pct     = 80.0;  // ถึงเป้าแรก ให้ปิดกี่ % (แนะนำ 70-80%)
+input double FinalTP_ATR         = 5.0;   // เป้าสุดท้าย (Hard TP) ตั้งไว้ไกลๆ กันกราฟพุ่งแรงเกินคาด
 
 //--- Global Variables
 string BotStatus = "STOPPED";
@@ -46,6 +67,8 @@ double LastProbability = 0.0;
 double LastATR = 0.0;
 int BarsSinceLastClose = 99;
 double LastDynamicRisk = 1.0;
+double DayStartEquity = 0.0;
+int    LastDayOfYear  = -1;
 
 //--- MQL5 JSON Utilities (Basic Implementation)
 string ExtractJsonString(string json_data, string key)
@@ -76,15 +99,42 @@ double ExtractJsonDouble(string json_data, string key)
 // --- OnTick ---
 void OnTick()
 {
-    // --- ตรวจจับการปิดออเดอร์ ---
-    static int prev_positions = 0;
-    int current_positions = PositionsTotal();
-    if (current_positions < prev_positions)
-    {
-        Print("INFO: Position closed (TP/SL/TS). Starting Cooldown.");
-        BarsSinceLastClose = 0;
+    // ---------------------------------------------------------
+    // 1. [NEW] Daily Equity Hard Stop (เช็คทุก Tick)
+    // ---------------------------------------------------------
+    datetime now = TimeCurrent();
+    MqlDateTime dt;
+    TimeToStruct(now, dt);
+
+    // รีเซ็ตค่า Equity ต้นวัน เมื่อขึ้นวันใหม่
+    if (dt.day_of_year != LastDayOfYear) {
+        DayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+        LastDayOfYear  = dt.day_of_year;
+        Print("📅 New Day: DayStartEquity reset to ", DayStartEquity);
     }
-    prev_positions = current_positions;
+
+    // เช็คว่าขาดทุนเกินกำหนดหรือยัง
+    if (DayStartEquity > 0) {
+        double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+        double lossPct = (DayStartEquity - currentEquity) / DayStartEquity * 100.0;
+        
+        if (lossPct >= MaxDailyLossPercent) {
+            Comment("⛔ DAILY HARD STOP HIT! ⛔\nLoss: ", DoubleToString(lossPct, 2), "%");
+            return; // หยุดทำงานทันที ไม่เทรดต่อ
+        }
+    }
+
+    // ---------------------------------------------------------
+    // 2. [NEW] Partial Close Monitor (เช็คออเดอร์ที่มีอยู่)
+    // ---------------------------------------------------------
+    if (UsePartialClose) CheckPartialClose();
+        static int prev_positions = 0;
+        int current_positions = PositionsTotal();
+        if (current_positions < prev_positions) {
+            Print("INFO: Position closed. Starting Cooldown.");
+            BarsSinceLastClose = 0;
+        }
+        prev_positions = current_positions;
 
     // --- Circuit Breaker Check ---
     int consecutive_losses = 0;
@@ -103,7 +153,10 @@ void OnTick()
     }
 
     HandleTrailingStops();
+
     HandleTimeExit();
+
+    ManageRunner();
 
     // --- ตรรกะการตัดสินใจ ---
     static datetime prev_time = 0;
@@ -125,15 +178,24 @@ void OnTick()
             TimeToStruct(current_time, dt);
             
             // ถ้าชั่วโมงปัจจุบัน น้อยกว่า Start หรือ มากกว่า End -> ห้ามเทรด
-            if (dt.hour < TradeStartHour || dt.hour > TradeEndHour)
+            // --- [แก้ไข] Time Filter Logic ใหม่ (รองรับข้ามคืน) ---
+            bool isTradingHour = false;
+            if (TradeStartHour < TradeEndHour) {
+                // กรณีปกติ (เช่น 08:00 - 20:00)
+                if (dt.hour >= TradeStartHour && dt.hour < TradeEndHour) isTradingHour = true;
+            } else {
+                // กรณีข้ามคืน (เช่น 22:00 - 02:00)
+                if (dt.hour >= TradeStartHour || dt.hour < TradeEndHour) isTradingHour = true;
+            }
+
+            if (!isTradingHour)
             {
-                // (Optional) Print บอกแค่ครั้งเดียวตอนเปลี่ยนชั่วโมงเพื่อไม่ให้รก Log
                 static int last_print_hour = -1;
                 if (dt.hour != last_print_hour) {
                     Print(StringFormat("INFO: Outside Trading Hours (%02d:00). Waiting for %02d:00.", dt.hour, TradeStartHour));
                     last_print_hour = dt.hour;
                 }
-                return; // ⛔ จบการทำงาน ไม่ส่งไปถาม Python
+                return; // ⛔ จบการทำงาน
             }
         }
         
@@ -325,23 +387,28 @@ string GetSignalFromAPI(string data_json)
 
 void ExecuteTrade(string signal, double atr_value)
 {
+    // ---------------------------------------------------------
+    // 3. [NEW] Dynamic Spread Filter
+    // ---------------------------------------------------------
+    int currentSpread = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+    if (currentSpread > MaxSpreadPoints) {
+        Print("⚠️ High Spread (", currentSpread, " > ", MaxSpreadPoints, "). Trade Skipped.");
+        return;
+    }
+
     if (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) == 0 || AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) == 0) return;
-    if (PositionSelect(_Symbol)) return;
+    if (PositionSelect(_Symbol)) return; // มีออเดอร์อยู่แล้ว ไม่เปิดเพิ่ม
+    if (OrdersTotal() > 0) return;       // มี Pending Order รออยู่แล้ว ไม่เปิดเพิ่ม
 
-    if (atr_value <= 0.0) { Print("❌ ExecuteTrade Error: Invalid LastATR."); return; }
+    if (atr_value <= 0.0 || atr_value < _Point) return;
     
+    // คำนวณ Lot เหมือนเดิม
     double sl_distance = atr_value * SL_Multiplier;
-    if (sl_distance <= 0.0) return;
-
     double risk_amount = AccountInfoDouble(ACCOUNT_BALANCE) * (LastDynamicRisk / 100.0);
     double contract_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
     double calculated_lots = risk_amount / (sl_distance * contract_size);
 
-    MqlTradeRequest request;
-    MqlTradeResult  result;
-    ZeroMemory(request);
-    ZeroMemory(result);
-    
+    // Normalize Lot
     double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
     double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
     double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
@@ -350,40 +417,69 @@ void ExecuteTrade(string signal, double atr_value)
     volume = MathMax(minLot, MathMin(MaxLotSize, volume));
     if (volume < minLot) return;
 
-    request.action    = TRADE_ACTION_DEAL;
+    // เตรียม Request
+    MqlTradeRequest request;
+    MqlTradeResult  result;
+    ZeroMemory(request);
+    ZeroMemory(result);
+    
     request.symbol    = _Symbol;
     request.volume    = volume;
     request.deviation = 50;
     request.magic     = MagicNumber;
-    request.type_filling = ORDER_FILLING_IOC;
-    request.type_time    = ORDER_TIME_GTC;
-    request.sl = 0.0;
-    request.tp = 0.0;
+    request.type_filling = ORDER_FILLING_IOC; 
     
+    // ดึงราคาล่าสุด
     MqlTick tick;
-    if(!SymbolInfoTick(_Symbol, tick)) { Print("❌ Failed to get tick"); return; }
-    if (TimeCurrent() - tick.time > 10) { Print("⚠️ Tick data is stale"); return; }
+    if(!SymbolInfoTick(_Symbol, tick)) return;
 
-    if (signal == "BUY") {
-        request.type = ORDER_TYPE_BUY;
-        request.comment = "RNN_v7.0_BUY";
-        request.price = tick.ask;
-    } else if (signal == "SELL") {
-        request.type = ORDER_TYPE_SELL;
-        request.comment = "RNN_v7.0_SELL";
-        request.price = tick.bid;
-    } else return;
+    // ---------------------------------------------------------
+    // 4. [NEW] Smart Entry (Limit Order Logic)
+    // ---------------------------------------------------------
+    if (UseLimitOrder) {
+        request.action = TRADE_ACTION_PENDING;
+        request.type_time = ORDER_TIME_SPECIFIED;
+        request.expiration = TimeCurrent() + (LimitExpirationMins * 60); // หมดอายุใน X นาที
 
-    bool sent = OrderSend(request, result);
-    if (sent && (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED))
-    {
-        Print("✅ Order Opened. Deal: ", (string)result.deal, ". Setting Dynamic SL/TP...");
-        ModifyOrderSLTP(result.deal, signal, atr_value);
-        string alert_msg = StringFormat("✅ %s Order Opened: Price %.5f, Lots %.2f", signal, request.price, volume);
-        SendTradeAlert(alert_msg);
-        LastSignalTime = TimeCurrent();
+        if (signal == "BUY") {
+            request.type = ORDER_TYPE_BUY_LIMIT;
+            // ตั้งรอที่ราคา Bid (หรือต่ำกว่านั้น) เพื่อไม่ต้องจ่าย Spread ทันที
+            request.price = NormalizeDouble(tick.bid - (LimitDistancePoints * _Point), _Digits);
+            request.comment = "RNN_v7_SmartBuy";
+        } else if (signal == "SELL") {
+            request.type = ORDER_TYPE_SELL_LIMIT;
+            // ตั้งรอที่ราคา Ask (หรือสูงกว่านั้น)
+            request.price = NormalizeDouble(tick.ask + (LimitDistancePoints * _Point), _Digits);
+            request.comment = "RNN_v7_SmartSell";
+        }
+    } else {
+        // แบบเดิม (Market Order)
+        request.action = TRADE_ACTION_DEAL;
+        request.type_time = ORDER_TIME_GTC;
+        if (signal == "BUY") {
+            request.type = ORDER_TYPE_BUY;
+            request.price = tick.ask;
+        } else {
+            request.type = ORDER_TYPE_SELL;
+            request.price = tick.bid;
+        }
     }
-    else Print("❌ ", signal, " failed: ", result.retcode, " ", result.comment);
+
+    // ส่งคำสั่ง
+    if (OrderSend(request, result)) {
+        if (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED) {
+            Print("✅ Smart Entry Placed: ", signal, " @ ", request.price);
+            
+            // ถ้าเป็น Market Order ให้ตั้ง SL/TP เลย 
+            // (ถ้าเป็น Limit Order ต้องรอให้ Match ก่อน ค่อยไปตั้งใน OnTradeTransaction หรือ Loop เช็คเอา ซึ่ง EA นี้มี ModifyOrderSLTP รอรับอยู่แล้วตอน Position เกิด)
+            if (!UseLimitOrder) {
+                ModifyOrderSLTP(result.deal, signal, atr_value);
+                LastSignalTime = TimeCurrent();
+            }
+        }
+    } else {
+        Print("❌ OrderSend Failed: ", result.retcode, " ", result.comment);
+    }
 }
 
 void SendAccountStatusToAPI(string alert_message = "")
@@ -439,10 +535,16 @@ void ModifyOrderSLTP(ulong deal_ticket, string signal, double atr_value)
     request_mod.position = position_ticket;
     request_mod.symbol = _Symbol;
     
-    double tp_mult = TP_Multiplier;
-    
     double sl_points_dynamic = (atr_value * SL_Multiplier);
-    double tp_points_dynamic = (atr_value * tp_mult); // ⬅️ [แก้ไข]
+    // แก้ไขบรรทัดนี้ใน ModifyOrderSLTP (หรือ ExecuteTrade ถ้าตั้ง TP เลย)
+    // เดิม: double tp_points_dynamic = (atr_value * TP_Multiplier);
+
+    // ใหม่: ใช้ Logic นี้
+    double tp_mult_use = TP_Multiplier; // ค่า Default เดิม
+    if (UseRunnerStrategy) {
+        tp_mult_use = FinalTP_ATR; // ถ้าใช้ Runner ให้ตั้ง TP ไกลๆ
+    }
+    double tp_points_dynamic = (atr_value * tp_mult_use);
 
     double sl_price = 0.0;
     double tp_price = 0.0;
@@ -503,53 +605,73 @@ void ModifyOrderSLTP(ulong deal_ticket, string signal, double atr_value)
 
 void HandleTrailingStops()
 {
-    if (!UseTrailingStop)
-    {
-        return;
-    }
+    // ถ้าปิดระบบ หรือไม่มี ATR หรือไม่มีออเดอร์ ให้จบงาน
+    if (!UseTrailingStop) return;
     if (LastATR <= 0.0) return;
-    if (!PositionSelect(_Symbol))
-    {
-        return;
-    }
+    if (!PositionSelect(_Symbol)) return;
     
-    double TrailingStartPoints_Dynamic = (LastATR * TrailingStart_ATR_Mult) / _Point;
-    double TrailingDistancePoints_Dynamic = (LastATR * TrailingDist_ATR_Mult) / _Point;
+    // แปลง ATR เป็นระยะ Point
+    double TrailingStartPoints    = (LastATR * TrailingStart_ATR_Mult) / _Point;
+    double TrailingDistPoints     = (LastATR * TrailingDist_ATR_Mult) / _Point;
+    double TrailingStepPoints     = (LastATR * TrailingStep_ATR_Mult) / _Point; // ระยะขั้นต่ำในการขยับ
 
-    ulong position_ticket = PositionGetInteger(POSITION_TICKET);
-    long position_type = PositionGetInteger(POSITION_TYPE); 
-    double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
-    double current_sl = PositionGetDouble(POSITION_SL);
-    double current_tp = PositionGetDouble(POSITION_TP); 
+    // ดึงข้อมูล Position
+    ulong  ticket = PositionGetInteger(POSITION_TICKET);
+    long   type   = PositionGetInteger(POSITION_TYPE);
+    double open   = PositionGetDouble(POSITION_PRICE_OPEN);
+    double sl     = PositionGetDouble(POSITION_SL);
+    double tp     = PositionGetDouble(POSITION_TP);
     
+    // ดึงราคาตลาดล่าสุด
     MqlTick tick;
-    if(!SymbolInfoTick(_Symbol, tick)) { return; } 
+    if(!SymbolInfoTick(_Symbol, tick)) return;
 
-    double new_sl_price = 0.0;
+    double new_sl = 0.0;
     double profit_points = 0.0;
-    
-    if (position_type == POSITION_TYPE_BUY)
+
+    // --- กรณี BUY ---
+    if (type == POSITION_TYPE_BUY)
     {
-        new_sl_price = NormalizeDouble(tick.bid - (TrailingDistancePoints_Dynamic * _Point), _Digits);
-        profit_points = (tick.bid - open_price) / _Point;
+        // 1. คำนวณกำไรปัจจุบันเป็น Point
+        profit_points = (tick.bid - open) / _Point;
         
-        if (profit_points >= TrailingStartPoints_Dynamic && new_sl_price > current_sl)
+        // 2. เช็คว่ากำไรถึงจุดเริ่มทำงานหรือยัง? (Start)
+        if (profit_points < TrailingStartPoints) return;
+
+        // 3. คำนวณ SL เป้าหมาย (ราคาปัจจุบัน - ระยะห่าง)
+        new_sl = NormalizeDouble(tick.bid - (TrailingDistPoints * _Point), _Digits);
+        
+        // 4. เงื่อนไขการขยับ:
+        //    a. SL ใหม่ต้องมากกว่า SL เดิม (ไม่ถอยหลัง)
+        //    b. SL ใหม่ต้องมากกว่า SL เดิม เกินระยะ Step (กัน Spam)
+        //    c. SL ใหม่ต้องไม่เกินราคา Bid ปัจจุบัน (กัน Error Invalid Stops)
+        if (new_sl > sl && (new_sl - sl) >= (TrailingStepPoints * _Point))
         {
-             if(new_sl_price >= tick.bid) return;
-             Print("DEBUG: Trailing BUY Stop. Profit: ", profit_points, "p. Moving SL to: ", DoubleToString(new_sl_price, _Digits));
-             SendModifySLTP(position_ticket, new_sl_price, current_tp);
+            if (new_sl >= tick.bid) return; // Safety check
+            
+            Print("🏃 Trailing BUY: Profit ", profit_points, " pts. Moving SL ", DoubleToString(sl, _Digits), " -> ", DoubleToString(new_sl, _Digits));
+            SendModifySLTP(ticket, new_sl, tp);
         }
     }
-    else if (position_type == POSITION_TYPE_SELL)
+    // --- กรณี SELL ---
+    else if (type == POSITION_TYPE_SELL)
     {
-        new_sl_price = NormalizeDouble(tick.ask + (TrailingDistancePoints_Dynamic * _Point), _Digits);
-        profit_points = (open_price - tick.ask) / _Point;
+        // 1. คำนวณกำไร
+        profit_points = (open - tick.ask) / _Point;
         
-        if (profit_points >= TrailingStartPoints_Dynamic && (new_sl_price < current_sl || current_sl == 0.0))
+        // 2. เช็ค Start
+        if (profit_points < TrailingStartPoints) return;
+
+        // 3. คำนวณ SL เป้าหมาย (ราคาปัจจุบัน + ระยะห่าง)
+        new_sl = NormalizeDouble(tick.ask + (TrailingDistPoints * _Point), _Digits);
+        
+        // 4. เงื่อนไขการขยับ (SL 0.0 คือยังไม่เคยตั้ง)
+        if ((new_sl < sl || sl == 0.0) && (sl == 0.0 || (sl - new_sl) >= (TrailingStepPoints * _Point)))
         {
-             if(new_sl_price <= tick.ask) return;
-             Print("DEBUG: Trailing SELL Stop. Profit: ", profit_points, "p. Moving SL to: ", DoubleToString(new_sl_price, _Digits));
-             SendModifySLTP(position_ticket, new_sl_price, current_tp);
+            if (new_sl <= tick.ask) return; // Safety check
+            
+            Print("🏃 Trailing SELL: Profit ", profit_points, " pts. Moving SL ", DoubleToString(sl, _Digits), " -> ", DoubleToString(new_sl, _Digits));
+            SendModifySLTP(ticket, new_sl, tp);
         }
     }
 }
@@ -723,5 +845,165 @@ void CheckCircuitBreaker(int &loss_count, datetime &last_loss_time)
          break;
       }
    }
+}
+
+void CheckPartialClose()
+{
+    if (!PositionSelect(_Symbol)) return;
+
+    ulong ticket = PositionGetInteger(POSITION_TICKET);
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    
+    // ถ้า Lot เหลือเท่าขั้นต่ำแล้ว แบ่งปิดไม่ได้อีก
+    if (volume <= minLot) return;
+
+    long type = PositionGetInteger(POSITION_TYPE);
+    double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+    double tp = PositionGetDouble(POSITION_TP);
+    double sl = PositionGetDouble(POSITION_SL);
+    
+    // ถ้าไม่มี TP ก็คำนวณไม่ได้
+    if (tp == 0.0) return;
+
+    MqlTick tick;
+    SymbolInfoTick(_Symbol, tick);
+    double currentPrice = (type == POSITION_TYPE_BUY) ? tick.bid : tick.ask;
+    
+    double distTotal = MathAbs(tp - openPrice);
+    double distCurrent = MathAbs(currentPrice - openPrice);
+    
+    // ถ้ากำไรยังไม่เป็นบวก ให้ข้ามไป (ป้องกัน Logic ผิดพลาดตอนขาดทุน)
+    double profit = PositionGetDouble(POSITION_PROFIT);
+    if (profit <= 0) return;
+
+    // เงื่อนไข: วิ่งไปถึง % ของ TP แล้วหรือยัง?
+    if (distCurrent >= (distTotal * (PartialClose_Pct / 100.0)))
+    {
+        // เทคนิค: เช็คว่าเราเคย Partial Close ไปแล้วหรือยัง?
+        // ดูง่ายๆ ว่า SL ถูกย้ายมาบังทุน (Break Even) หรือยัง ถ้ายัง แสดงว่ายังไม่ Partial
+        bool isSLCovered = false;
+        if (type == POSITION_TYPE_BUY && sl >= openPrice) isSLCovered = true;
+        if (type == POSITION_TYPE_SELL && sl <= openPrice && sl > 0) isSLCovered = true;
+
+        if (!isSLCovered) // ถ้ายังไม่บังทุน แสดงว่าเพิ่งถึงเป้าครั้งแรก
+        {
+            double closeVol = NormalizeDouble(volume * (PartialClose_Vol / 100.0), 2);
+            // ปัดเศษให้ตรง Step
+            double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+            closeVol = MathFloor(closeVol / lotStep) * lotStep;
+            if (closeVol < minLot) closeVol = minLot;
+
+            Print("💰 Partial Close Triggered! Closing ", closeVol, " lots.");
+            
+            // ปิดออเดอร์บางส่วน
+            MqlTradeRequest req;
+            MqlTradeResult  res;
+            ZeroMemory(req); ZeroMemory(res);
+            
+            req.action = TRADE_ACTION_DEAL;
+            req.position = ticket;
+            req.symbol = _Symbol;
+            req.volume = closeVol;
+            req.type = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+            req.price = (type == POSITION_TYPE_BUY) ? tick.bid : tick.ask;
+            req.deviation = 50;
+            
+            if (OrderSend(req, res)) {
+                // ------------------------------------------
+                // สำคัญ: ย้าย SL มาบังทุนทันที (Break Even)
+                // ------------------------------------------
+                Print("✅ Partial Close Done. Moving SL to Break Even.");
+                SendModifySLTP(ticket, openPrice, tp); // ใช้ฟังก์ชันที่มีอยู่เดิมแก้ SL เท่ากับราคาเปิด
+            }
+        }
+    }
+}
+
+void ManageRunner()
+{
+    if (!UseRunnerStrategy) return;
+    if (!PositionSelect(_Symbol)) return;
+
+    // ดึงข้อมูล Position
+    ulong  ticket = PositionGetInteger(POSITION_TICKET);
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    
+    // ถ้าเหลือ Lot น้อยกว่าขั้นต่ำ x 2 แสดงว่าอาจจะปิดไปแล้ว หรือแบ่งปิดไม่ได้แล้ว
+    if (volume <= minLot) return;
+
+    long   type      = PositionGetInteger(POSITION_TYPE);
+    double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+    double sl        = PositionGetDouble(POSITION_SL);
+    
+    // คำนวณระยะเป้าหมายแรก (Virtual TP) จาก ATR ที่เราบันทึกไว้ (LastATR)
+    // หมายเหตุ: เพื่อความแม่นยำ ควรบันทึก EntryATR แยกไว้ตอนเข้าเทรด แต่ใช้ LastATR แก้ขัดได้ถ้าราคาไม่เปลี่ยนความผันผวนมาก
+    if (LastATR <= 0) return; 
+    
+    double targetDist = LastATR * FirstTarget_ATR; 
+    
+    // ตรวจสอบราคาปัจจุบัน
+    MqlTick tick;
+    SymbolInfoTick(_Symbol, tick);
+    
+    bool hitTarget = false;
+    double currentProfitPts = 0.0;
+
+    if (type == POSITION_TYPE_BUY) {
+        if (tick.bid >= openPrice + targetDist) hitTarget = true;
+    } else {
+        if (tick.ask <= openPrice - targetDist) hitTarget = true;
+    }
+
+    // --- Action เมื่อชนเป้าแรก ---
+    if (hitTarget)
+    {
+        // เช็คก่อนว่าเคย Partial Close ไปหรือยัง?
+        // ดูง่ายๆ: ถ้า SL ยังไม่บังทุน แสดงว่ายังไม่ได้ทำ Runner (หรือเช็ค Volume เอาก็ได้)
+        bool isSecured = false;
+        if (type == POSITION_TYPE_BUY && sl >= openPrice) isSecured = true;
+        if (type == POSITION_TYPE_SELL && sl <= openPrice && sl > 0) isSecured = true;
+
+        if (!isSecured) // ถ้ายังไม่บังทุน แสดงว่าเพิ่งชนเป้าแรก
+        {
+            Print("🏃 Runner Triggered! Hit Target 1. Locking Profit...");
+
+            // 1. คำนวณ Lot ที่จะปิด (เช่น 80%)
+            double closeVol = NormalizeDouble(volume * (CloseVolume_Pct / 100.0), 2);
+            double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+            closeVol = MathFloor(closeVol / lotStep) * lotStep;
+            
+            // เหลือไว้อย่างน้อยเท่า minLot
+            if (volume - closeVol < minLot) closeVol = volume - minLot; 
+            
+            if (closeVol >= minLot) {
+                // ส่งคำสั่งปิดบางส่วน
+                MqlTradeRequest req;
+                MqlTradeResult  res;
+                ZeroMemory(req); ZeroMemory(res);
+                
+                req.action = TRADE_ACTION_DEAL;
+                req.position = ticket;
+                req.symbol = _Symbol;
+                req.volume = closeVol;
+                req.type = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+                req.price = (type == POSITION_TYPE_BUY) ? tick.bid : tick.ask;
+                req.deviation = 50;
+                
+                if (OrderSend(req, res)) {
+                    Print("✅ Closed ", closeVol, " Lots. Leaving Runner.");
+                    
+                    // 2. ย้าย SL มาบังทุน (Break Even) ทันที
+                    double be_sl = openPrice;
+                    // เผื่อ Spread นิดหน่อยให้ไม่ขาดทุนค่าคอม (ถ้ามี)
+                    if (type == POSITION_TYPE_BUY) be_sl += 10 * _Point; 
+                    else be_sl -= 10 * _Point;
+                    
+                    SendModifySLTP(ticket, be_sl, PositionGetDouble(POSITION_TP));
+                }
+            }
+        }
+    }
 }
 //+------------------------------------------------------------------+

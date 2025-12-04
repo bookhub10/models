@@ -39,10 +39,10 @@ try:
     if root_dir not in sys.path:
         sys.path.append(root_dir)
     
-    # [v7.0] Import from linux_model.py
+    # [v7.1] Import from linux_model.py
     from linux_model import compute_features_lite, scale_features, REQUIRED_FEATURES
     
-    print("✅ External model functions (18 Features - v7.0) loaded successfully.")
+    print("✅ External model functions (18 Features - v7.1) loaded successfully.")
 except ImportError as e:
     print(f"❌ FATAL: Cannot import from linux_model.py. Error: {e}")
     sys.exit(1)
@@ -82,7 +82,7 @@ REQUIRED_FEATURES = [
 account_status = {
     'bot_status': 'STOPPED', 'balance': 0.0, 'equity': 0.0,
     'margin_free': 0.0, 'open_trades': 0, 'last_signal': 'NONE',
-    'last_regime': 'V7.01' 
+    'last_regime': 'V7.1' 
 }
 
 news_lockdown = {'active': False, 'message': 'News filter starting...'}
@@ -310,7 +310,7 @@ def load_assets():
             if scaler.n_features_in_ != len(REQUIRED_FEATURES):
                 print(f"⚠️ WARNING: Scaler/Config mismatch. Scaler needs {scaler.n_features_in_}, Config has {len(REQUIRED_FEATURES)}")
 
-        print("✅ All v7 assets loaded successfully.")
+        print("✅ All v7.1 assets loaded successfully.")
         return True
     except FileNotFoundError as e:
         print(f"❌ Error: Model or Scaler file not found. {e}")
@@ -482,6 +482,13 @@ def predict_signal():
         else:
             dynamic_risk_pct = calculate_dynamic_risk(prob)
         
+        # --- [START FIX] อัปเดตสถานะลง Global Variable ---
+        account_status.update({
+            'last_signal': signal,
+            'last_regime': regime
+        })
+        # --- [END FIX] ----------------------------------
+        
         return jsonify({
             'signal': signal,
             'probability': float(prob),
@@ -539,9 +546,9 @@ def retrain_model_async():
     try:
         download_model_assets() 
         if load_assets():
-            return jsonify({'status': 'SUCCESS', 'message': '✅ Retraining completed and model (v7) loaded.'}), 200
+            return jsonify({'status': 'SUCCESS', 'message': '✅ Retraining completed and model (v7.1) loaded.'}), 200
         else:
-            return jsonify({'status': 'FAIL', 'message': '⚠️ Model (v7) or scaler could not be loaded after download.'}), 500
+            return jsonify({'status': 'FAIL', 'message': '⚠️ Model (v7.1) or scaler could not be loaded after download.'}), 500
 
     except Exception as e:
         print(f"❌ Error in retrain_model_async: {e}")
@@ -608,13 +615,13 @@ def fix_system_files():
         
     assets_loaded = load_assets()
     
-    message = "✅ System files and assets (v7) updated successfully."
+    message = "✅ System files and assets (v7.1) updated successfully."
     
     if not python_downloaded:
-        message = "⚠️ Python files update failed for one or more files. Assets (v7) reloaded."
+        message = "⚠️ Python files update failed for one or more files. Assets (v7.1) reloaded."
 
     if not assets_loaded:
-        return jsonify({'status': 'FAIL', 'message': '⚠️ Assets (v7) downloaded but failed to load. System files updated. **Please manually restart.**'}), 500
+        return jsonify({'status': 'FAIL', 'message': '⚠️ Assets (v7.1) downloaded but failed to load. System files updated. **Please manually restart.**'}), 500
 
     return jsonify({
         'status': 'SUCCESS', 
@@ -630,4 +637,4 @@ if __name__ == '__main__':
         print("💡 NOTE: Remember to start the separate telegram_bot.py script.")
         app.run(host='0.0.0.0', port=5000)
     else:
-        print("❌ FATAL: Could not load v7 model/scaler. API not starting.")
+        print("❌ FATAL: Could not load v7.1 model/scaler. API not starting.")
