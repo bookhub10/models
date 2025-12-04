@@ -431,7 +431,7 @@ def preprocess_and_predict(raw_data):
     
 # --- [Dynamic Risk Manager] ---
 def calculate_dynamic_risk(probability):
-    if probability > 0.85: # ⬅️ (ต้องปรับใหม่)
+    if probability > 0.75: # ⬅️ (ต้องปรับใหม่)
         return 2.0  
     elif probability > 0.65: # ⬅️ (ต้องปรับใหม่)
         return 1.5  

@@ -3,7 +3,7 @@
 //+------------------------------------------------------------------+
 #property copyright "OakJkpG OBot Project"
 #property version   "7.1" 
-#property description "RNN(CNN) v7.1"
+#property description "RNN(CNN + LSTM) v7.1"
 
 // --- Inputs ---
 input string APIServerURL = "http://127.0.0.1:5000";
