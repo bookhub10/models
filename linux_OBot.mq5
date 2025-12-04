@@ -10,15 +10,15 @@ input string APIServerURL = "http://127.0.0.1:5000";
 input int    LookbackBars = 1000; // (ใช้ 120 แท่งฝั่ง api)
 input int    MagicNumber  = 12345;
 input double MaxLotSize  = 1.0;
-input double ProbThreshold = 0.45; 
+input double ProbThreshold = 0.55; 
 input double MinATR        = 1.0;
 input int    MinTradeIntervalMins = 1;
-input double SL_Multiplier = 1.0;
-input double TP_Multiplier = 1.5;
+input double SL_Multiplier = 1.5;
+input double TP_Multiplier = 2.0;
 
 // --- Trailing Stop Inputs (Updated) ---
 input bool   UseTrailingStop       = true;
-input double TrailingStart_ATR_Mult = 1.3;  // กำไรเท่านี้เริ่มทำงาน (Start)
+input double TrailingStart_ATR_Mult = 2.0;  // กำไรเท่านี้เริ่มทำงาน (Start)
 input double TrailingDist_ATR_Mult  = 1.0;  // รักษาระยะห่างเท่านี้ (Distance)
 input double TrailingStep_ATR_Mult  = 0.1;  // [NEW] ต้องขยับอย่างน้อย 0.1 ATR ถึงจะแก้ SL (ลด Spam)
 input int    MaxHoldBars = 12;
@@ -39,12 +39,12 @@ input int    MaxConsecutiveLosses = 3; // ขาดทุนติดกัน�
 input int    PenaltyPauseHours    = 1; // ถ้าครบกำหนด ให้หยุดพักกี่ชั่วโมง
 
 // --- [NEW] Risk Management Inputs ---
-input double MaxDailyLossPercent = 50.0;   // ตัดขาดทุนรายวันเมื่อ Equity ลดลง 50% จากต้นวัน
+input double MaxDailyLossPercent = 25.0;   // ตัดขาดทุนรายวันเมื่อ Equity ลดลง 25% จากต้นวัน
 input int    MaxSpreadPoints     = 35;    // ไม่เข้าเทรดถ้า Spread เกิน 35 จุด (กันสเปรดถ่าง)
 
 // --- [NEW] Profit Taking Inputs ---
-input bool   UsePartialClose     = true;  // เปิดใช้ระบบแบ่งปิดกำไร
-input double PartialClose_Pct    = 25.0;  // แบ่งปิดเมื่อกำไรถึง 50% ของระยะ TP
+input bool   UsePartialClose     = false;  // เปิดใช้ระบบแบ่งปิดกำไร
+input double PartialClose_Pct    = 50.0;  // แบ่งปิดเมื่อกำไรถึง 50% ของระยะ TP
 input double PartialClose_Vol    = 50.0;  // ปิดออกกี่ % ของ Lot (เช่น 50% คือปิดครึ่งนึง)
 
 // --- [NEW] Smart Entry Inputs ---
@@ -54,9 +54,9 @@ input int    LimitExpirationMins = 10;    // ยกเลิก Limit Order ถ�
 
 // --- [NEW] Runner Strategy Inputs ---
 input bool   UseRunnerStrategy   = true;  // เปิดโหมดปล่อยไหล
-input double FirstTarget_ATR     = 1.5;   // เป้าแรก (Virtual TP) ที่จะเก็บกำไรก้อนใหญ่ (ค่าเดิมของคุณ)
-input double CloseVolume_Pct     = 80.0;  // ถึงเป้าแรก ให้ปิดกี่ % (แนะนำ 70-80%)
-input double FinalTP_ATR         = 5.0;   // เป้าสุดท้าย (Hard TP) ตั้งไว้ไกลๆ กันกราฟพุ่งแรงเกินคาด
+input double FirstTarget_ATR     = 2.0;   // เป้าแรก (Virtual TP) ที่จะเก็บกำไรก้อนใหญ่ (ค่าเดิมของคุณ)
+input double CloseVolume_Pct     = 70.0;  // ถึงเป้าแรก ให้ปิดกี่ % (แนะนำ 70-80%)
+input double FinalTP_ATR         = 6.0;   // เป้าสุดท้าย (Hard TP) ตั้งไว้ไกลๆ กันกราฟพุ่งแรงเกินคาด
 
 //--- Global Variables
 string BotStatus = "STOPPED";

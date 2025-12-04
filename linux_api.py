@@ -58,9 +58,9 @@ class Config:
     SCALER_PATH = 'models/scaler.pkl'
 
     SEQUENCE_LENGTH = 50
-    PREDICTION_THRESHOLD = 0.45 
+    PREDICTION_THRESHOLD = 0.55 
     NEWS_LOCKDOWN_MINUTES = 30
-    MIN_ATR = 1.0       # ใส่ค่าตาม run_lite
+    MIN_ATR = 1.0
     USE_EMA_FILTER = True
 
 app = Flask(__name__)
